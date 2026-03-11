@@ -1,0 +1,15 @@
+id: Semmeringbahn
+name: Semmeringbahn
+description: Discovery-only route profile generated from the local install scan. Curate stock, spawn points, and templates before using it for scenario validation.
+game_version: tsw5
+
+supported_stock: []
+spawn_points: []
+templates: []
+supported_weather: []
+
+install_ids:
+  - Semmeringbahn
+
+install_hints:
+  - Semmeringbahn

@@ -1,0 +1,27 @@
+id: RRO
+name: Ruhr-Sieg Nord
+description: Example route profile for the TSW Scenario Tool MVP.
+game_version: tsw5
+
+supported_stock:
+  - DB_BR422
+
+spawn_points:
+  - Essen_Hbf_P5
+  - Bochum_Hbf_P3
+
+templates:
+  - id: commuter_simple
+    description: Basic commuter scenario template for passenger services.
+
+supported_weather:
+  - clear
+  - cloudy
+  - rain
+
+install_ids:
+  - RuhrSiegNord
+
+install_hints:
+  - RRO
+  - Ruhr-Sieg Nord

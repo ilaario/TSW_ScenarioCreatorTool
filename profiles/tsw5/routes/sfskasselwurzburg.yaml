@@ -1,0 +1,15 @@
+id: SFSKasselWurzburg
+name: SFS Kassel Wurzburg
+description: Discovery-only route profile generated from the local install scan. Curate stock, spawn points, and templates before using it for scenario validation.
+game_version: tsw5
+
+supported_stock: []
+spawn_points: []
+templates: []
+supported_weather: []
+
+install_ids:
+  - SFSKasselWurzburg
+
+install_hints:
+  - SFS Kassel Wurzburg

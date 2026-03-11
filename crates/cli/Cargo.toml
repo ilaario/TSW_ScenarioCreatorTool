@@ -1,0 +1,17 @@
+[package]
+name = "tswtool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tsw-scenario-compiler.workspace = true
+tsw-scenario-core.workspace = true
+tsw-scenario-scanner.workspace = true
+tsw-scenario-schema.workspace = true
+tsw-scenario-validator.workspace = true

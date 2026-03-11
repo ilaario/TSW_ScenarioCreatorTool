@@ -1,0 +1,15 @@
+id: LiberecStaraPaka
+name: Liberec Stara Paka
+description: Discovery-only route profile generated from the local install scan. Curate stock, spawn points, and templates before using it for scenario validation.
+game_version: tsw5
+
+supported_stock: []
+spawn_points: []
+templates: []
+supported_weather: []
+
+install_ids:
+  - LiberecStaraPaka
+
+install_hints:
+  - Liberec Stara Paka

@@ -1,0 +1,10 @@
+id: commuter_simple
+name: Commuter Simple
+description: Minimal commuter scenario scaffold with token rendering for the TSW5 MVP workflow.
+output_subdir: template
+render_extensions:
+  - yaml
+  - yml
+  - json
+  - txt
+  - md

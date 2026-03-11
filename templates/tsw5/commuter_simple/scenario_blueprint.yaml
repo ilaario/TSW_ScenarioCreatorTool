@@ -1,0 +1,24 @@
+meta:
+  id: {{meta.id}}
+  title: {{meta.title}}
+  author: {{meta.author}}
+
+template:
+  name: {{template.name}}
+
+scenario:
+  route: {{scenario.route}}
+  template: {{scenario.template}}
+  start_time: {{scenario.start_time}}
+  weather: {{scenario.weather}}
+
+summary:
+  ai_service_count: {{counts.ai_services}}
+  objective_count: {{counts.objectives}}
+  success_condition_count: {{counts.success_conditions}}
+  failure_condition_count: {{counts.failure_conditions}}
+
+player_service:
+  consist: {{player_service.consist}}
+  start_location: {{player_service.start_location}}
+  destination: {{player_service.destination}}

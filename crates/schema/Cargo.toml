@@ -1,0 +1,9 @@
+[package]
+name = "tsw-scenario-schema"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
