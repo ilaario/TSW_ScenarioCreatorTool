@@ -1,13 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tsw_scenario_core::{resolve_project_root, resolve_relative_to, TemplateBundle};
 use tsw_scenario_schema::{
-    CompiledScenario, CompiledScenarioSummary, CompiledTemplateInfo, PackageEntry,
-    PackageEntryKind, PackagePlan, ScenarioProject,
+    CompiledFormation, CompiledScenario, CompiledScenarioSummary, CompiledTemplateInfo,
+    FormationDefinition, PackageEntry, PackageEntryKind, PackagePlan, ResolvedFormationVehicle,
+    ScenarioProject,
 };
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,7 @@ struct BuildManifest {
     template_name: String,
     template_output_subdir: String,
     consist: String,
+    formation_count: usize,
     ai_service_count: usize,
     objective_count: usize,
     success_condition_count: usize,
@@ -72,7 +74,7 @@ pub fn compile_project(
     let template_output_dir = build_dir.join(template_bundle.definition.output_subdir());
     copy_template_directory(project, template_bundle, &template_output_dir)?;
 
-    let compiled_scenario = build_compiled_scenario(project, template_bundle);
+    let compiled_scenario = build_compiled_scenario(project, template_bundle)?;
     let manifest_path = build_dir.join("manifest.json");
     let scenario_path = build_dir.join("scenario.yaml");
     let compiled_scenario_path = build_dir.join("compiled_scenario.json");
@@ -131,7 +133,11 @@ fn build_manifest(
         template: project.scenario.template.clone(),
         template_name: template_bundle.definition.name.clone(),
         template_output_subdir: template_bundle.definition.output_subdir().to_string(),
-        consist: project.player_service.consist.clone(),
+        consist: service_reference_label(
+            project.player_service.consist_id(),
+            project.player_service.formation_id(),
+        ),
+        formation_count: summary.formation_count,
         ai_service_count: summary.ai_service_count,
         objective_count: summary.objective_count,
         success_condition_count: summary.success_condition_count,
@@ -144,13 +150,16 @@ fn build_manifest(
 fn build_compiled_scenario(
     project: &ScenarioProject,
     template_bundle: &TemplateBundle,
-) -> CompiledScenario {
-    CompiledScenario {
+) -> Result<CompiledScenario> {
+    let compiled_formations = build_compiled_formations(&project.formations)?;
+
+    Ok(CompiledScenario {
         schema_version: 1,
         meta: project.meta.clone(),
         scenario: project.scenario.clone(),
         player_service: project.player_service.clone(),
         ai_services: project.ai_services.clone(),
+        formations: compiled_formations,
         objectives: project.objectives.clone(),
         completion: project.completion.clone(),
         template: CompiledTemplateInfo {
@@ -159,12 +168,116 @@ fn build_compiled_scenario(
             output_subdir: template_bundle.definition.output_subdir().to_string(),
         },
         summary: CompiledScenarioSummary {
+            formation_count: project.formations.len(),
             ai_service_count: project.ai_services.len(),
             objective_count: project.objectives.len(),
             success_condition_count: project.completion.success.len(),
             failure_condition_count: project.completion.failure.len(),
         },
+    })
+}
+
+fn build_compiled_formations(
+    formations: &BTreeMap<String, FormationDefinition>,
+) -> Result<Vec<CompiledFormation>> {
+    let mut cache = HashMap::new();
+    let mut compiled_formations = Vec::new();
+
+    for (formation_id, definition) in formations {
+        let mut stack = Vec::new();
+        let resolved_vehicles = resolve_formation(
+            formation_id,
+            formations,
+            &mut cache,
+            &mut stack,
+        )?;
+
+        compiled_formations.push(CompiledFormation {
+            id: formation_id.clone(),
+            definition: definition.clone(),
+            resolved_vehicles,
+        });
     }
+
+    Ok(compiled_formations)
+}
+
+fn resolve_formation(
+    formation_id: &str,
+    formations: &BTreeMap<String, FormationDefinition>,
+    cache: &mut HashMap<String, Vec<ResolvedFormationVehicle>>,
+    stack: &mut Vec<String>,
+) -> Result<Vec<ResolvedFormationVehicle>> {
+    if let Some(cached) = cache.get(formation_id) {
+        return Ok(cached.clone());
+    }
+
+    if stack.iter().any(|candidate| candidate == formation_id) {
+        let mut cycle = stack.clone();
+        cycle.push(formation_id.to_string());
+        bail!("formation cycle detected: {}", cycle.join(" -> "));
+    }
+
+    let definition = formations.get(formation_id).with_context(|| {
+        format!("formation '{}' is not defined", formation_id)
+    })?;
+
+    stack.push(formation_id.to_string());
+    let mut resolved = Vec::new();
+
+    for entry in &definition.entries {
+        if entry.count == 0 {
+            bail!("formation '{}' contains an entry with count 0", formation_id);
+        }
+
+        let vehicle = entry.vehicle.as_deref().filter(|value| !value.trim().is_empty());
+        let nested_formation = entry
+            .formation
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+
+        match (vehicle, nested_formation) {
+            (Some(vehicle_id), None) => {
+                for instance_index in 0..entry.count {
+                    resolved.push(ResolvedFormationVehicle {
+                        vehicle: vehicle_id.to_string(),
+                        flipped: entry.flipped || entry.flipped_indices.contains(&instance_index),
+                        cargo: entry.cargo.clone(),
+                    });
+                }
+            }
+            (None, Some(nested_id)) => {
+                let nested_resolved = resolve_formation(nested_id, formations, cache, stack)?;
+                for instance_index in 0..entry.count {
+                    let should_flip = entry.flipped || entry.flipped_indices.contains(&instance_index);
+                    for nested_vehicle in &nested_resolved {
+                        let mut vehicle = nested_vehicle.clone();
+                        vehicle.flipped ^= should_flip;
+                        if let Some(cargo) = &entry.cargo {
+                            vehicle.cargo = Some(cargo.clone());
+                        }
+                        resolved.push(vehicle);
+                    }
+                }
+            }
+            (Some(_), Some(_)) => {
+                bail!(
+                    "formation '{}' contains an entry that defines both vehicle and formation",
+                    formation_id
+                )
+            }
+            (None, None) => {
+                bail!(
+                    "formation '{}' contains an entry without vehicle or formation reference",
+                    formation_id
+                )
+            }
+        }
+    }
+
+    stack.pop();
+    cache.insert(formation_id.to_string(), resolved.clone());
+    Ok(resolved)
 }
 
 fn build_package_staging(
@@ -437,7 +550,18 @@ fn render_tokens(input: &str, project: &ScenarioProject, template_bundle: &Templ
         ("{{scenario.weather}}".to_string(), project.scenario.weather.clone()),
         (
             "{{player_service.consist}}".to_string(),
-            project.player_service.consist.clone(),
+            service_reference_label(
+                project.player_service.consist_id(),
+                project.player_service.formation_id(),
+            ),
+        ),
+        (
+            "{{player_service.formation}}".to_string(),
+            project
+                .player_service
+                .formation_id()
+                .unwrap_or_default()
+                .to_string(),
         ),
         (
             "{{player_service.start_location}}".to_string(),
@@ -448,6 +572,10 @@ fn render_tokens(input: &str, project: &ScenarioProject, template_bundle: &Templ
             project.player_service.destination.clone(),
         ),
         ("{{template.name}}".to_string(), template_bundle.definition.name.clone()),
+        (
+            "{{counts.formations}}".to_string(),
+            project.formations.len().to_string(),
+        ),
         (
             "{{counts.ai_services}}".to_string(),
             project.ai_services.len().to_string(),
@@ -471,6 +599,16 @@ fn render_tokens(input: &str, project: &ScenarioProject, template_bundle: &Templ
         rendered = rendered.replace(&token, &value);
     }
     rendered
+}
+
+fn service_reference_label(consist: Option<&str>, formation: Option<&str>) -> String {
+    if let Some(consist_id) = consist {
+        consist_id.to_string()
+    } else if let Some(formation_id) = formation {
+        format!("formation:{formation_id}")
+    } else {
+        "unknown".to_string()
+    }
 }
 
 fn normalized_package_namespace(namespace: &str) -> String {
@@ -507,8 +645,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tsw_scenario_core::TemplateBundle;
     use tsw_scenario_schema::{
-        AiService, CompletionRules, Condition, ConditionKind, Meta, Objective, ObjectiveKind,
-        PlayerService, Scenario, ScenarioProject, TemplateDefinition,
+        AiService, CompletionRules, Condition, ConditionKind, FormationDefinition,
+        FormationEntry, Meta, Objective, ObjectiveKind, PlayerService, Scenario, ScenarioProject,
+        TemplateDefinition,
     };
 
     fn temp_workspace(name: &str) -> PathBuf {
@@ -522,6 +661,21 @@ mod tests {
     }
 
     fn sample_project() -> ScenarioProject {
+        let mut formations = BTreeMap::new();
+        formations.insert(
+            "player_train".to_string(),
+            FormationDefinition {
+                entries: vec![FormationEntry {
+                    vehicle: Some("DB_BR422".to_string()),
+                    formation: None,
+                    count: 1,
+                    flipped: false,
+                    flipped_indices: Vec::new(),
+                    cargo: None,
+                }],
+            },
+        );
+
         ScenarioProject {
             meta: Meta {
                 id: "rro_test_001".to_string(),
@@ -534,14 +688,17 @@ mod tests {
                 start_time: "08:15".to_string(),
                 weather: "cloudy".to_string(),
             },
+            formations,
             player_service: PlayerService {
-                consist: "DB_BR422".to_string(),
+                consist: None,
+                formation: Some("player_train".to_string()),
                 start_location: "Essen_Hbf_P5".to_string(),
                 destination: "Bochum_Hbf_P3".to_string(),
             },
             ai_services: vec![AiService {
                 id: "ai_regional_01".to_string(),
-                consist: "DB_BR422".to_string(),
+                consist: Some("DB_BR422".to_string()),
+                formation: None,
                 start_location: "Bochum_Hbf_P3".to_string(),
                 destination: "Essen_Hbf_P5".to_string(),
                 departure_time: Some("08:05".to_string()),
@@ -584,7 +741,7 @@ mod tests {
         .expect("failed to write template definition");
         fs::write(
             template_root.join("content").join("scenario_stub.yaml"),
-            "id: {{meta.id}}\nroute: {{scenario.route}}\nai_services: {{counts.ai_services}}\n",
+            "id: {{meta.id}}\nroute: {{scenario.route}}\nplayer_ref: {{player_service.consist}}\nplayer_formation: {{player_service.formation}}\nformations: {{counts.formations}}\nai_services: {{counts.ai_services}}\n",
         )
         .expect("failed to write template file");
 
@@ -638,8 +795,13 @@ mod tests {
 
         assert!(rendered.contains("id: rro_test_001"));
         assert!(rendered.contains("route: RRO"));
+        assert!(rendered.contains("player_ref: formation:player_train"));
+        assert!(rendered.contains("player_formation: player_train"));
+        assert!(rendered.contains("formations: 1"));
         assert!(rendered.contains("ai_services: 1"));
-        assert!(compiled_json.contains("\"objective_count\": 1"));
+        assert!(compiled_json.contains("\"formation_count\": 1"));
+        assert!(compiled_json.contains("\"id\": \"player_train\""));
+        assert!(compiled_json.contains("\"vehicle\": \"DB_BR422\""));
         assert!(package_plan.contains("\"package_namespace\": \"ScenarioMods/Test\""));
         assert!(package_plan.contains("/Content/ScenarioMods/Test/rro_test_001/compiled_scenario.json"));
         assert!(staged_template.exists());

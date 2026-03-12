@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -20,20 +22,78 @@ pub struct Scenario {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerService {
-    pub consist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formation: Option<String>,
     pub start_location: String,
     pub destination: String,
+}
+
+impl PlayerService {
+    pub fn consist_id(&self) -> Option<&str> {
+        non_empty_option(self.consist.as_deref())
+    }
+
+    pub fn formation_id(&self) -> Option<&str> {
+        non_empty_option(self.formation.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AiService {
     pub id: String,
-    pub consist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formation: Option<String>,
     pub start_location: String,
     pub destination: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub departure_time: Option<String>,
+}
+
+impl AiService {
+    pub fn consist_id(&self) -> Option<&str> {
+        non_empty_option(self.consist.as_deref())
+    }
+
+    pub fn formation_id(&self) -> Option<&str> {
+        non_empty_option(self.formation.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FormationCargo {
+    pub asset: String,
+    #[serde(default = "default_cargo_units", skip_serializing_if = "is_default_cargo_units")]
+    pub units: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FormationEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formation: Option<String>,
+    #[serde(default = "default_entry_count", skip_serializing_if = "is_default_entry_count")]
+    pub count: usize,
+    #[serde(default)]
+    pub flipped: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flipped_indices: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo: Option<FormationCargo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FormationDefinition {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<FormationEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,6 +160,8 @@ impl CompletionRules {
 pub struct ScenarioProject {
     pub meta: Meta,
     pub scenario: Scenario,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub formations: BTreeMap<String, FormationDefinition>,
     pub player_service: PlayerService,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ai_services: Vec<AiService>,
@@ -258,10 +320,29 @@ pub struct CompiledTemplateInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledScenarioSummary {
+    pub formation_count: usize,
     pub ai_service_count: usize,
     pub objective_count: usize,
     pub success_condition_count: usize,
     pub failure_condition_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedFormationVehicle {
+    pub vehicle: String,
+    pub flipped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo: Option<FormationCargo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledFormation {
+    pub id: String,
+    pub definition: FormationDefinition,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_vehicles: Vec<ResolvedFormationVehicle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -273,6 +354,8 @@ pub struct CompiledScenario {
     pub player_service: PlayerService,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ai_services: Vec<AiService>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formations: Vec<CompiledFormation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objectives: Vec<Objective>,
     #[serde(default, skip_serializing_if = "CompletionRules::is_empty")]
@@ -308,4 +391,24 @@ pub struct PackagePlan {
     pub staging_root: String,
     pub mount_root: String,
     pub entries: Vec<PackageEntry>,
+}
+
+fn default_entry_count() -> usize {
+    1
+}
+
+fn is_default_entry_count(value: &usize) -> bool {
+    *value == default_entry_count()
+}
+
+fn default_cargo_units() -> u32 {
+    1
+}
+
+fn is_default_cargo_units(value: &u32) -> bool {
+    *value == default_cargo_units()
+}
+
+fn non_empty_option(value: Option<&str>) -> Option<&str> {
+    value.filter(|candidate| !candidate.trim().is_empty())
 }

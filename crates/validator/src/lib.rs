@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use tsw_scenario_schema::{
-    AiService, Condition, ConditionKind, Objective, ObjectiveKind, RouteProfile, ScenarioProject,
-    TemplateDefinition,
+    AiService, Condition, ConditionKind, FormationDefinition, FormationEntry, Objective,
+    ObjectiveKind, RouteProfile, ScenarioProject, TemplateDefinition,
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -53,11 +53,6 @@ pub fn validate_project(
     require_non_empty(&mut report, "scenario.weather", &project.scenario.weather);
     require_non_empty(
         &mut report,
-        "player_service.consist",
-        &project.player_service.consist,
-    );
-    require_non_empty(
-        &mut report,
         "player_service.start_location",
         &project.player_service.start_location,
     );
@@ -67,12 +62,16 @@ pub fn validate_project(
         &project.player_service.destination,
     );
 
+    let resolved_formations = validate_formations(&mut report, route_profile, &project.formations);
+
     validate_service(
         &mut report,
         route_profile,
+        &resolved_formations,
         "player_service",
         None,
-        &project.player_service.consist,
+        project.player_service.consist_id(),
+        project.player_service.formation_id(),
         &project.player_service.start_location,
         &project.player_service.destination,
         None,
@@ -147,7 +146,14 @@ pub fn validate_project(
 
     let mut ai_service_ids = HashSet::new();
     for (index, ai_service) in project.ai_services.iter().enumerate() {
-        validate_ai_service(&mut report, route_profile, ai_service, index, &mut ai_service_ids);
+        validate_ai_service(
+            &mut report,
+            route_profile,
+            &resolved_formations,
+            ai_service,
+            index,
+            &mut ai_service_ids,
+        );
     }
 
     let mut objective_ids = HashSet::new();
@@ -160,20 +166,224 @@ pub fn validate_project(
     report
 }
 
+fn validate_formations(
+    report: &mut ValidationReport,
+    route_profile: &RouteProfile,
+    formations: &BTreeMap<String, FormationDefinition>,
+) -> HashMap<String, Vec<String>> {
+    for (formation_id, definition) in formations {
+        validate_formation_definition(report, route_profile, formations, formation_id, definition);
+    }
+
+    let mut resolved_formations = HashMap::new();
+    for formation_id in formations.keys() {
+        let mut stack = Vec::new();
+        resolve_formation(
+            report,
+            formations,
+            formation_id,
+            &mut resolved_formations,
+            &mut stack,
+        );
+    }
+
+    resolved_formations
+}
+
+fn validate_formation_definition(
+    report: &mut ValidationReport,
+    route_profile: &RouteProfile,
+    formations: &BTreeMap<String, FormationDefinition>,
+    formation_id: &str,
+    definition: &FormationDefinition,
+) {
+    let formation_field = format!("formations.{formation_id}");
+
+    if formation_id.trim().is_empty() {
+        report.errors.push(issue(
+            "EMPTY_FORMATION_ID",
+            "formations",
+            "formation ids cannot be empty".to_string(),
+        ));
+    }
+
+    if definition.entries.is_empty() {
+        report.errors.push(issue(
+            "EMPTY_FORMATION",
+            &format!("{formation_field}.entries"),
+            format!("formation '{}' must contain at least one entry", formation_id),
+        ));
+    }
+
+    for (index, entry) in definition.entries.iter().enumerate() {
+        validate_formation_entry(
+            report,
+            route_profile,
+            formations,
+            formation_id,
+            entry,
+            index,
+        );
+    }
+}
+
+fn validate_formation_entry(
+    report: &mut ValidationReport,
+    route_profile: &RouteProfile,
+    formations: &BTreeMap<String, FormationDefinition>,
+    formation_id: &str,
+    entry: &FormationEntry,
+    index: usize,
+) {
+    let field_prefix = format!("formations.{formation_id}.entries[{index}]");
+    let vehicle = entry.vehicle.as_deref().filter(|value| !value.trim().is_empty());
+    let nested_formation = entry
+        .formation
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+
+    match (vehicle, nested_formation) {
+        (Some(_), Some(_)) => report.errors.push(issue(
+            "AMBIGUOUS_FORMATION_ENTRY",
+            &field_prefix,
+            "formation entries must choose either 'vehicle' or 'formation'".to_string(),
+        )),
+        (None, None) => report.errors.push(issue(
+            "MISSING_FORMATION_ENTRY_TARGET",
+            &field_prefix,
+            "formation entries must define either 'vehicle' or 'formation'".to_string(),
+        )),
+        (Some(vehicle_id), None) => {
+            if !route_profile.supports_stock(vehicle_id) {
+                report.errors.push(issue(
+                    "INVALID_ROLLING_STOCK",
+                    &format!("{field_prefix}.vehicle"),
+                    format!(
+                        "rolling stock '{}' is not supported by route '{}'",
+                        vehicle_id, route_profile.id
+                    ),
+                ));
+            }
+        }
+        (None, Some(nested_id)) => {
+            if !formations.contains_key(nested_id) {
+                report.errors.push(issue(
+                    "UNKNOWN_FORMATION_REFERENCE",
+                    &format!("{field_prefix}.formation"),
+                    format!("formation '{}' is not defined", nested_id),
+                ));
+            }
+        }
+    }
+
+    if entry.count == 0 {
+        report.errors.push(issue(
+            "INVALID_FORMATION_ENTRY_COUNT",
+            &format!("{field_prefix}.count"),
+            "formation entry count must be at least 1".to_string(),
+        ));
+    }
+
+    if let Some(cargo) = &entry.cargo {
+        if cargo.asset.trim().is_empty() {
+            report.errors.push(issue(
+                "INVALID_FORMATION_CARGO",
+                &format!("{field_prefix}.cargo.asset"),
+                "cargo.asset cannot be empty when cargo is defined".to_string(),
+            ));
+        }
+    }
+
+    for (flipped_index_position, flipped_index) in entry.flipped_indices.iter().enumerate() {
+        if *flipped_index >= entry.count.max(1) {
+            report.errors.push(issue(
+                "INVALID_FLIPPED_INDEX",
+                &format!("{field_prefix}.flipped_indices[{flipped_index_position}]"),
+                format!(
+                    "flipped index '{}' is outside the repeated entry range 0..{}",
+                    flipped_index,
+                    entry.count.saturating_sub(1)
+                ),
+            ));
+        }
+    }
+}
+
+fn resolve_formation(
+    report: &mut ValidationReport,
+    formations: &BTreeMap<String, FormationDefinition>,
+    formation_id: &str,
+    resolved_formations: &mut HashMap<String, Vec<String>>,
+    stack: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    if let Some(resolved) = resolved_formations.get(formation_id) {
+        return Some(resolved.clone());
+    }
+
+    if stack.iter().any(|candidate| candidate == formation_id) {
+        let mut cycle = stack.clone();
+        cycle.push(formation_id.to_string());
+        report.errors.push(issue(
+            "FORMATION_CYCLE",
+            &format!("formations.{formation_id}"),
+            format!("formation cycle detected: {}", cycle.join(" -> ")),
+        ));
+        return None;
+    }
+
+    let Some(definition) = formations.get(formation_id) else {
+        return None;
+    };
+
+    stack.push(formation_id.to_string());
+    let mut resolved = Vec::new();
+
+    for entry in &definition.entries {
+        if entry.count == 0 {
+            continue;
+        }
+
+        if let Some(vehicle_id) = entry.vehicle.as_deref().filter(|value| !value.trim().is_empty()) {
+            for _ in 0..entry.count {
+                resolved.push(vehicle_id.to_string());
+            }
+            continue;
+        }
+
+        if let Some(nested_id) = entry
+            .formation
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if let Some(nested_resolved) = resolve_formation(
+                report,
+                formations,
+                nested_id,
+                resolved_formations,
+                stack,
+            ) {
+                for _ in 0..entry.count {
+                    resolved.extend(nested_resolved.iter().cloned());
+                }
+            }
+        }
+    }
+
+    stack.pop();
+    resolved_formations.insert(formation_id.to_string(), resolved.clone());
+    Some(resolved)
+}
+
 fn validate_ai_service(
     report: &mut ValidationReport,
     route_profile: &RouteProfile,
+    resolved_formations: &HashMap<String, Vec<String>>,
     ai_service: &AiService,
     index: usize,
     ai_service_ids: &mut HashSet<String>,
 ) {
     let field_prefix = format!("ai_services[{index}]");
     require_non_empty(report, &format!("{field_prefix}.id"), &ai_service.id);
-    require_non_empty(
-        report,
-        &format!("{field_prefix}.consist"),
-        &ai_service.consist,
-    );
     require_non_empty(
         report,
         &format!("{field_prefix}.start_location"),
@@ -196,9 +406,11 @@ fn validate_ai_service(
     validate_service(
         report,
         route_profile,
+        resolved_formations,
         &field_prefix,
         Some(&ai_service.id),
-        &ai_service.consist,
+        ai_service.consist_id(),
+        ai_service.formation_id(),
         &ai_service.start_location,
         &ai_service.destination,
         ai_service.departure_time.as_deref(),
@@ -368,22 +580,64 @@ fn validate_condition(
 fn validate_service(
     report: &mut ValidationReport,
     route_profile: &RouteProfile,
+    resolved_formations: &HashMap<String, Vec<String>>,
     field_prefix: &str,
     service_id: Option<&str>,
-    consist: &str,
+    consist: Option<&str>,
+    formation: Option<&str>,
     start_location: &str,
     destination: &str,
     departure_time: Option<&str>,
 ) {
-    if !consist.trim().is_empty() && !route_profile.supports_stock(consist) {
-        report.errors.push(issue(
-            "INVALID_ROLLING_STOCK",
+    match (consist, formation) {
+        (Some(consist_id), Some(_)) => {
+            report.errors.push(issue(
+                "AMBIGUOUS_SERVICE_STOCK_REFERENCE",
+                &format!("{field_prefix}.formation"),
+                "services must choose either 'consist' or 'formation'".to_string(),
+            ));
+
+            if !route_profile.supports_stock(consist_id) {
+                report.errors.push(issue(
+                    "INVALID_ROLLING_STOCK",
+                    &format!("{field_prefix}.consist"),
+                    format!(
+                        "rolling stock '{}' is not supported by route '{}'",
+                        consist_id, route_profile.id
+                    ),
+                ));
+            }
+        }
+        (Some(consist_id), None) => {
+            if !route_profile.supports_stock(consist_id) {
+                report.errors.push(issue(
+                    "INVALID_ROLLING_STOCK",
+                    &format!("{field_prefix}.consist"),
+                    format!(
+                        "rolling stock '{}' is not supported by route '{}'",
+                        consist_id, route_profile.id
+                    ),
+                ));
+            }
+        }
+        (None, Some(formation_id)) => match resolved_formations.get(formation_id) {
+            Some(resolved) if resolved.is_empty() => report.errors.push(issue(
+                "EMPTY_RESOLVED_FORMATION",
+                &format!("{field_prefix}.formation"),
+                format!("formation '{}' does not resolve to any vehicles", formation_id),
+            )),
+            Some(_) => {}
+            None => report.errors.push(issue(
+                "UNKNOWN_FORMATION_REFERENCE",
+                &format!("{field_prefix}.formation"),
+                format!("formation '{}' is not defined", formation_id),
+            )),
+        },
+        (None, None) => report.errors.push(issue(
+            "MISSING_SERVICE_STOCK_REFERENCE",
             &format!("{field_prefix}.consist"),
-            format!(
-                "rolling stock '{}' is not supported by route '{}'",
-                consist, route_profile.id
-            ),
-        ));
+            "services must define either 'consist' or 'formation'".to_string(),
+        )),
     }
 
     validate_spawn_point(
@@ -488,12 +742,25 @@ fn is_valid_time_format(value: &str) -> bool {
 mod tests {
     use super::*;
     use tsw_scenario_schema::{
-        AiService, CompletionRules, Condition, ConditionKind, Meta, Objective, ObjectiveKind,
-        PlayerService, RouteProfile, Scenario, ScenarioProject, TemplateDefinition,
-        TemplateReference,
+        CompletionRules, Condition, Meta, Objective, PlayerService, Scenario, TemplateReference,
     };
 
     fn sample_project() -> ScenarioProject {
+        let mut formations = BTreeMap::new();
+        formations.insert(
+            "player_train".to_string(),
+            FormationDefinition {
+                entries: vec![FormationEntry {
+                    vehicle: Some("DB_BR422".to_string()),
+                    formation: None,
+                    count: 1,
+                    flipped: false,
+                    flipped_indices: Vec::new(),
+                    cargo: None,
+                }],
+            },
+        );
+
         ScenarioProject {
             meta: Meta {
                 id: "rro_test_001".to_string(),
@@ -506,14 +773,17 @@ mod tests {
                 start_time: "08:15".to_string(),
                 weather: "cloudy".to_string(),
             },
+            formations,
             player_service: PlayerService {
-                consist: "DB_BR422".to_string(),
+                consist: None,
+                formation: Some("player_train".to_string()),
                 start_location: "Essen_Hbf_P5".to_string(),
                 destination: "Bochum_Hbf_P3".to_string(),
             },
             ai_services: vec![AiService {
                 id: "ai_regional_01".to_string(),
-                consist: "DB_BR422".to_string(),
+                consist: Some("DB_BR422".to_string()),
+                formation: None,
                 start_location: "Bochum_Hbf_P3".to_string(),
                 destination: "Essen_Hbf_P5".to_string(),
                 departure_time: Some("08:05".to_string()),
@@ -579,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_valid_project_with_ai_objectives_and_completion_rules() {
+    fn accepts_valid_project_with_formations_ai_objectives_and_completion_rules() {
         let report = validate_project(
             &sample_project(),
             &sample_route_profile(),
@@ -591,15 +861,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_ai_service_and_unknown_completion_references() {
+    fn rejects_invalid_nested_formations_and_unknown_completion_references() {
         let mut project = sample_project();
-        project.ai_services.push(AiService {
-            id: "ai_regional_01".to_string(),
-            consist: "DB_BR422".to_string(),
-            start_location: "Unknown".to_string(),
-            destination: "Bochum_Hbf_P3".to_string(),
-            departure_time: Some("8:05".to_string()),
-        });
+        project.formations.insert(
+            "broken".to_string(),
+            FormationDefinition {
+                entries: vec![FormationEntry {
+                    vehicle: None,
+                    formation: Some("missing".to_string()),
+                    count: 0,
+                    flipped: false,
+                    flipped_indices: vec![1],
+                    cargo: None,
+                }],
+            },
+        );
+        project.player_service.formation = Some("broken".to_string());
         project.completion.failure.push(Condition {
             kind: ConditionKind::ObjectiveFailed,
             objective_id: Some("missing_objective".to_string()),
@@ -618,18 +895,39 @@ mod tests {
         assert!(report
             .errors
             .iter()
-            .any(|issue| issue.code == "DUPLICATE_AI_SERVICE_ID"));
+            .any(|issue| issue.code == "UNKNOWN_FORMATION_REFERENCE"));
         assert!(report
             .errors
             .iter()
-            .any(|issue| issue.code == "INVALID_SPAWN_POINT"));
+            .any(|issue| issue.code == "INVALID_FORMATION_ENTRY_COUNT"));
         assert!(report
             .errors
             .iter()
-            .any(|issue| issue.code == "INVALID_TIME"));
+            .any(|issue| issue.code == "INVALID_FLIPPED_INDEX"));
         assert!(report
             .errors
             .iter()
             .any(|issue| issue.code == "UNKNOWN_OBJECTIVE_REFERENCE"));
     }
+
+    #[test]
+    fn rejects_services_that_define_both_consist_and_formation() {
+        let mut project = sample_project();
+        project.player_service.consist = Some("DB_BR422".to_string());
+
+        let report = validate_project(
+            &project,
+            &sample_route_profile(),
+            &sample_template_definition(),
+        );
+
+        assert!(report.has_errors());
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.code == "AMBIGUOUS_SERVICE_STOCK_REFERENCE"));
+    }
 }
+
+
+

@@ -1,15 +1,36 @@
 id: FrankfurtFulda
 name: Frankfurt Fulda
-description: Discovery-only route profile generated from the local install scan. Curate stock, spawn points, and templates before using it for scenario validation.
+description: Starter curated profile based on local route discovery and the BR111 gameplay pack analysis.
 game_version: tsw5
 
-supported_stock: []
-spawn_points: []
-templates: []
-supported_weather: []
+supported_stock:
+  - FTF_DB_BR111
+  - FTF_DB_NWagen
+  - FTF_DB_Bnrdzf_463
+
+spawn_points:
+  - Frankfurt (Main) Hbf Pl 1
+  - Frankfurt (Main) Hbf Pl 2
+  - Frankfurt (Main) Sud Pl 4
+  - Offenbach Hbf Pl 2
+  - Offenbach Ost Pl 2
+  - Hanau Hbf Pl 5
+  - Hanau Hbf Pl 6
+  - Fulda Platform 1
+
+templates:
+  - commuter_simple
+
+supported_weather:
+  - clear
+  - cloudy
+  - rain
 
 install_ids:
   - FrankfurtFulda
 
 install_hints:
   - Frankfurt Fulda
+  - Frankfurt - Fulda
+  - "Frankfurt - Fulda: Kinzigtalbahn"
+

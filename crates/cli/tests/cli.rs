@@ -25,7 +25,7 @@ fn create_fixture_workspace(pak_names: &[&str]) -> PathBuf {
 
     write_file(
         &workspace.join("examples").join("scenario.yaml"),
-        "meta:\n  id: cli_test_001\n  title: CLI Test\n  author: Dario\n\nscenario:\n  route: RRO\n  template: commuter_simple\n  start_time: \"08:15\"\n  weather: cloudy\n\nplayer_service:\n  consist: DB_BR422\n  start_location: Essen_Hbf_P5\n  destination: Bochum_Hbf_P3\n\nai_services:\n  - id: ai_regional_01\n    consist: DB_BR422\n    start_location: Bochum_Hbf_P3\n    destination: Essen_Hbf_P5\n    departure_time: \"08:05\"\n\nobjectives:\n  - id: stop_bochum\n    description: Reach Bochum Hbf\n    kind: stop_at\n    location: Bochum_Hbf_P3\n\ncompletion:\n  success:\n    - kind: all_objectives_completed\n  failure:\n    - kind: time_reached\n      time: \"09:00\"\n",
+        "meta:\n  id: cli_test_001\n  title: CLI Test\n  author: Dario\n\nscenario:\n  route: RRO\n  template: commuter_simple\n  start_time: \"08:15\"\n  weather: cloudy\n\nformations:\n  player_train:\n    entries:\n      - vehicle: DB_BR422\n\nplayer_service:\n  formation: player_train\n  start_location: Essen_Hbf_P5\n  destination: Bochum_Hbf_P3\n\nai_services:\n  - id: ai_regional_01\n    consist: DB_BR422\n    start_location: Bochum_Hbf_P3\n    destination: Essen_Hbf_P5\n    departure_time: \"08:05\"\n\nobjectives:\n  - id: stop_bochum\n    description: Reach Bochum Hbf\n    kind: stop_at\n    location: Bochum_Hbf_P3\n\ncompletion:\n  success:\n    - kind: all_objectives_completed\n  failure:\n    - kind: time_reached\n      time: \"09:00\"\n",
     );
     write_file(
         &workspace.join("profiles").join("tsw5").join("routes").join("rro.yaml"),
@@ -45,7 +45,7 @@ fn create_fixture_workspace(pak_names: &[&str]) -> PathBuf {
             .join("tsw5")
             .join("commuter_simple")
             .join("seed.yaml"),
-        "scenario_id: {{meta.id}}\nroute: {{scenario.route}}\nai_services: {{counts.ai_services}}\n",
+        "scenario_id: {{meta.id}}\nroute: {{scenario.route}}\nplayer_ref: {{player_service.consist}}\nformations: {{counts.formations}}\nai_services: {{counts.ai_services}}\n",
     );
 
     let game_dir = workspace.join("fake_game").join("TS2Prototype").join("Content").join("DLC");
@@ -234,9 +234,13 @@ fn build_command_generates_template_output_compiled_json_package_plan_and_stagin
 
     assert!(rendered.contains("scenario_id: cli_test_001"));
     assert!(rendered.contains("route: RRO"));
+    assert!(rendered.contains("player_ref: formation:player_train"));
+    assert!(rendered.contains("formations: 1"));
     assert!(rendered.contains("ai_services: 1"));
     assert!(compiled.contains("\"objective_count\": 1"));
     assert!(compiled.contains("\"ai_service_count\": 1"));
+    assert!(compiled.contains("\"formation_count\": 1"));
+    assert!(compiled.contains("\"id\": \"player_train\""));
     assert!(plan.contains("\"package_namespace\": \"ScenarioMods/CLI\""));
     assert!(plan.contains("/Content/ScenarioMods/CLI/cli_test_001/template/seed.yaml"));
     assert!(staged_template.exists());

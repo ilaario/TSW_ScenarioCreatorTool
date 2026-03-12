@@ -1,23 +1,109 @@
-# TSW Scenario Tool
+﻿# TSW Scenario Tool
 
-`tswtool` is a CLI-first Rust workspace for validating and building Train Sim World scenario mods from a simple YAML file.
+`tswtool` is a CLI-first Rust workspace for authoring Train Sim World scenarios from a simple YAML file.
 
-Current scope:
+The project direction is intentionally narrow:
 
-- parse scenario YAML
-- load game, route, and template profiles
-- scan a local TSW installation for installed DLC `.pak` files
-- map canonical DLC ids to supported route profiles
-- validate the configuration
-- generate a build directory from a template scaffold
-- emit a compiled JSON representation
-- generate a package staging layout and package plan for future `.pak` packaging
+- build a scenario builder + validator first
+- treat `.pak` packaging as an optional final step
+- keep route profiles as the source of truth for what is valid
+- avoid centering the architecture around reverse engineering or packaging
 
-Still out of scope:
+## Core Pipeline
+
+```text
+Scenario YAML
+  -> Validator
+  -> Template compiler
+  -> Build folder
+  -> (optional) package staging / .pak packaging later
+```
+
+The real MVP is not a packaging tool. The real MVP is a reliable workflow for:
+
+1. defining a scenario in YAML
+2. validating it against curated route profiles
+3. compiling it into a predictable build folder
+
+## Current MVP Focus
+
+The core product scope is:
+
+1. Scenario schema
+2. Route profiles
+3. Validator
+4. Builder
+
+Minimal example:
+
+```yaml
+meta:
+  id: rro_test_001
+  title: Test Scenario
+  author: Dario
+
+scenario:
+  route: RRO
+  template: commuter_simple
+  start_time: "08:15"
+  weather: cloudy
+
+player_service:
+  consist: DB_BR422
+  start_location: Essen_Hbf_P5
+  destination: Bochum_Hbf_P3
+```
+
+Matching route profile example:
+
+```yaml
+id: RRO
+name: Ruhr-Sieg Nord
+
+supported_stock:
+  - DB_BR422
+
+spawn_points:
+  - Essen_Hbf_P5
+  - Bochum_Hbf_P3
+
+templates:
+  - commuter_simple
+```
+
+See:
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Dovetail Questions](docs/DOVETAIL_QUESTIONS.md)
+
+## Repository Status
+
+The repository already contains code and data beyond the narrow MVP path. Today, the important distinction is:
+
+- core path: schema, profiles, validation, build output
+- optional support track: install scanning and package staging
+
+Existing capabilities in the workspace include:
+
+- scenario YAML parsing
+- profile loading
+- validation
+- build directory generation from templates
+- compiled JSON output
+- optional install scan support
+- package staging preparation for future packaging work
+
+Those extra pieces should support the core workflow, not define it.
+
+## Out Of Scope For Now
+
+These are explicitly deferred until the validator/builder workflow is solid:
 
 - Unreal asset generation
 - `.uasset` parsing
-- `.pak` packaging itself
+- `.pak` packaging
+- mod installer
 - GUI
 
 ## Workspace Layout
@@ -32,6 +118,10 @@ tsw-scenario-tool/
 |  |- scanner/
 |  |- schema/
 |  `- validator/
+|- docs/
+|  |- ARCHITECTURE.md
+|  |- DOVETAIL_QUESTIONS.md
+|  `- ROADMAP.md
 |- examples/
 |  `- rro_example.yaml
 |- profiles/
@@ -54,24 +144,6 @@ Validate a scenario:
 cargo run -- validate examples/rro_example.yaml
 ```
 
-Scan a local TSW installation and write `install_scan.json`:
-
-```bash
-cargo run -- scan --game-dir "C:/Games/Train Sim World 6"
-```
-
-Validate using a live scan of the game installation:
-
-```bash
-cargo run -- validate examples/rro_example.yaml --game-dir "C:/Games/Train Sim World 6"
-```
-
-Validate using a previously saved install scan cache:
-
-```bash
-cargo run -- validate examples/rro_example.yaml --install-scan install_scan.json
-```
-
 Build a scenario:
 
 ```bash
@@ -84,181 +156,32 @@ Build and clean the previous output first:
 cargo run -- build examples/rro_example.yaml --clean
 ```
 
-Build with a custom package namespace for staging:
-
-```bash
-cargo run -- build examples/rro_example.yaml --clean --package-namespace ScenarioMods/RRO
-```
-
 Emit the validation report as JSON:
 
 ```bash
 cargo run -- validate examples/rro_example.yaml --json
 ```
 
-Emit the enriched install scan report as JSON:
+Optional install scan support:
 
 ```bash
-cargo run -- scan --game-dir "C:/Games/Train Sim World 6" --json
+cargo run -- scan --game-dir "C:/Games/Train Sim World 6"
 ```
 
-## Install Scanning
-
-The scanner is a read-only discovery layer for local DLC content.
-
-It currently:
-
-- recursively scans a Train Sim World installation for `.pak` files
-- derives a `canonical_dlc_id` from pack names such as `TS2Prototype-WindowsNoEditor-RuhrSiegNord.pak`
-- stores a machine-readable cache in `install_scan.json`
-- matches canonical DLC ids against supported route profiles
-- lets `validate` and `build` check whether the requested route appears to be installed
-
-Important design note:
-
-- profiles remain the source of truth for supported stock, spawn points, templates, and game compatibility
-- install scanning answers "what seems to be installed on this machine?"
-- a DLC can be installed but still unsupported by the tool if no profile exists yet
-
-If `install_scan.json` exists in the project root, `validate` and `build` will load it automatically unless `--game-dir` or `--install-scan` is provided explicitly.
-
-## Route Profiles And Canonical DLC Ids
-
-Route profiles now distinguish between canonical game ids and user-facing aliases.
-
-Example:
-
-```yaml
-id: RRO
-name: Ruhr-Sieg Nord
-
-install_ids:
-  - RuhrSiegNord
-
-install_hints:
-  - RRO
-  - Ruhr-Sieg Nord
-```
-
-Recommended usage:
-
-- `install_ids`: exact canonical DLC identifiers derived from `.pak` names
-- `install_hints`: human-friendly aliases and abbreviations used as fallback matching terms
-
-Matching order during validation is:
-
-1. canonical `install_ids`
-2. alias fallback using `id`, `name`, and `install_hints`
-
-## Enriched Scan Output
-
-`scan --json` now emits an enriched report that includes:
-
-- the raw install scan cache payload
-- `matched_routes`, for canonical DLC ids that match known route profiles
-- `unknown_canonical_dlcs`, for canonical DLC ids found in the install but not yet mapped to a route profile
-
-Each matched route also reports a `support_level`: `curated` when the profile has stock, spawn point, and template data, or `discovery_only` when the profile currently exists just for DLC recognition.
-
-This makes it easier to see names such as:
-
-- `RuhrSiegNord -> RRO`
-- `SoutheasternHighSpeed -> unknown`
-
-## Scenario YAML Example
-
-```yaml
-meta:
-  id: rro_test_001
-  title: Test Scenario
-  author: Dario
-
-scenario:
-  route: RRO
-  template: commuter_simple
-  start_time: "08:15"
-  weather: cloudy
-
-player_service:
-  consist: DB_BR422
-  start_location: Essen_Hbf_P5
-  destination: Bochum_Hbf_P3
-
-ai_services:
-  - id: ai_regional_01
-    consist: DB_BR422
-    start_location: Bochum_Hbf_P3
-    destination: Essen_Hbf_P5
-    departure_time: "08:05"
-
-objectives:
-  - id: stop_bochum
-    description: Reach Bochum Hbf platform 3
-    kind: stop_at
-    location: Bochum_Hbf_P3
-  - id: arrive_on_time
-    description: Arrive before 08:45
-    kind: arrive_by
-    time: "08:45"
-
-completion:
-  success:
-    - kind: all_objectives_completed
-  failure:
-    - kind: time_reached
-      time: "09:00"
-```
-
-## Build Output
-
-A build now produces both tool artifacts and packaging-oriented artifacts:
-
-```text
-build/<scenario-id>/
-|- compiled_scenario.json
-|- manifest.json
-|- package_plan.json
-|- scenario.yaml
-|- staging/
-|  `- Content/
-|     `- <package-namespace>/
-|        `- <scenario-id>/
-|           |- compiled_scenario.json
-|           `- template/
-|              |- README.md
-|              `- scenario_blueprint.yaml
-`- template/
-   |- README.md
-   `- scenario_blueprint.yaml
-```
-
-## Packaging Staging
-
-`package_plan.json` is the next-level compiler output that bridges the current builder and a future `.pak` packer.
-
-It records:
-
-- the package namespace
-- the suggested `.pak` filename
-- the staging root
-- the logical mount root
-- every packable entry with source path, staged path, and mount path
-
-The `staging/` directory mirrors what a future packaging step can consume directly.
-
-## Tests
-
-Run the full test suite with:
+Optional validation using a live scan:
 
 ```bash
-cargo test --workspace
+cargo run -- validate examples/rro_example.yaml --game-dir "C:/Games/Train Sim World 6"
 ```
 
-## Crates
+Optional validation using a saved install scan cache:
 
-- `tsw-scenario-schema`: shared data structures, including route profile install ids, compiled scenario, and package plan types
-- `tsw-scenario-core`: YAML, route profile, and template loading
-- `tsw-scenario-scanner`: local game installation scanning, canonical DLC id derivation, and install scan cache loading/saving
-- `tsw-scenario-validator`: semantic validation and structured reports
-- `tsw-scenario-compiler`: template-based build generation, compiled JSON emission, and package staging
-- `tswtool`: CLI entrypoint and enriched scan reporting
+```bash
+cargo run -- validate examples/rro_example.yaml --install-scan install_scan.json
+```
+
+## Design Notes
+
+- Profiles remain the source of truth for supported stock, spawn points, templates, and game compatibility.
+- Install scanning answers "what seems to be installed on this machine?" but does not decide what the tool supports.
+- Packaging is a downstream concern and should not become the primary architecture driver.
