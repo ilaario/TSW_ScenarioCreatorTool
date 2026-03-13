@@ -1,3 +1,5 @@
+mod route_discovery;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,6 +7,22 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+pub use route_discovery::{
+    build_location_catalog, build_stock_catalog, discover_formation_catalog, discover_route,
+    load_formation_catalog, load_location_catalog, load_route_discovery, load_stock_catalog,
+    resolve_flattened_formation_entries, resolve_formation_matches,
+    resolve_formation_reference_matches, resolve_location_matches,
+    resolve_location_reference_matches, resolve_stock_matches,
+    resolve_stock_reference_matches, save_formation_catalog, save_location_catalog,
+    save_route_discovery, save_stock_catalog, DiscoveredLocation, DiscoveredStock,
+    FlattenedFormationVehicle, FormationCatalog, FormationCatalogEntry,
+    FormationCatalogMember, FormationCatalogSummary, FormationMatchConstraints,
+    FrontendSpawnPoint, LocationAllowedUse, LocationCatalog, LocationCatalogEntry,
+    LocationCatalogStation, LocationCatalogSummary, LocationConfidence,
+    LocationLookupUsage, LocationMatch, LocationMatchConstraints, LocationMatchKind,
+    LocationSourceKind, RouteDiscovery, RouteDiscoveryError, RouteOverview,
+    StockCatalog, StockCatalogEntry, StockCatalogSummary, StockMatchConstraints,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallScan {
@@ -377,3 +395,7 @@ mod tests {
         assert_eq!(scan, loaded);
     }
 }
+
+
+
+

@@ -219,6 +219,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tsw-scenario-core",
+ "tsw-scenario-scanner",
  "tsw-scenario-schema",
 ]
 

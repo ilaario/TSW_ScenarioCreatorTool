@@ -20,23 +20,162 @@ pub struct Scenario {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ScenarioLocation {
+    Simple(String),
+    Detailed(ScenarioLocationReference),
+}
+
+impl ScenarioLocation {
+    pub fn reference(&self) -> Option<&ScenarioLocationReference> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(reference) => Some(reference),
+        }
+    }
+
+    pub fn primary_value(&self) -> Option<&str> {
+        match self {
+            Self::Simple(value) => non_empty_option(Some(value.as_str())),
+            Self::Detailed(reference) => reference.primary_value(),
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Simple(value) => non_empty_option(Some(value.as_str())),
+            Self::Detailed(reference) => non_empty_option(reference.name.as_deref()),
+        }
+    }
+
+    pub fn catalog_id(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(reference) => non_empty_option(reference.catalog_id.as_deref()),
+        }
+    }
+
+    pub fn spawn_tag(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(reference) => non_empty_option(reference.spawn_tag.as_deref()),
+        }
+    }
+
+    pub fn internal_ref(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(reference) => non_empty_option(reference.internal_ref.as_deref()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primary_value().is_none()
+    }
+
+    pub fn display_label(&self) -> String {
+        self.primary_value().unwrap_or_default().to_string()
+    }
+
+    pub fn has_explicit_selector(&self) -> bool {
+        self.catalog_id().is_some() || self.spawn_tag().is_some() || self.internal_ref().is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioLocationReference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_ref: Option<String>,
+}
+
+impl ScenarioLocationReference {
+    pub fn primary_value(&self) -> Option<&str> {
+        non_empty_option(self.name.as_deref())
+            .or_else(|| non_empty_option(self.spawn_tag.as_deref()))
+            .or_else(|| non_empty_option(self.catalog_id.as_deref()))
+            .or_else(|| non_empty_option(self.internal_ref.as_deref()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ScenarioAssetReference {
+    Simple(String),
+    Detailed(ScenarioAssetSelector),
+}
+
+impl ScenarioAssetReference {
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Self::Simple(value) => non_empty_option(Some(value.as_str())),
+            Self::Detailed(reference) => non_empty_option(Some(reference.id.as_str())),
+        }
+    }
+
+    pub fn plugin(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(reference) => non_empty_option(reference.plugin.as_deref()),
+        }
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Detailed(reference) => non_empty_option(reference.source.as_deref()),
+        }
+    }
+
+    pub fn display_label(&self) -> String {
+        self.id().unwrap_or_default().to_string()
+    }
+
+    pub fn has_explicit_selector(&self) -> bool {
+        self.plugin().is_some() || self.source().is_some()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioAssetSelector {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PlayerService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consist: Option<String>,
+    pub consist: Option<ScenarioAssetReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formation: Option<String>,
-    pub start_location: String,
-    pub destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formation_ref: Option<ScenarioAssetReference>,
+    pub start_location: ScenarioLocation,
+    pub destination: ScenarioLocation,
 }
 
 impl PlayerService {
     pub fn consist_id(&self) -> Option<&str> {
-        non_empty_option(self.consist.as_deref())
+        self.consist.as_ref().and_then(ScenarioAssetReference::id)
     }
 
     pub fn formation_id(&self) -> Option<&str> {
         non_empty_option(self.formation.as_deref())
+    }
+
+    pub fn formation_ref_id(&self) -> Option<&str> {
+        self.formation_ref.as_ref().and_then(ScenarioAssetReference::id)
     }
 }
 
@@ -45,22 +184,28 @@ impl PlayerService {
 pub struct AiService {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consist: Option<String>,
+    pub consist: Option<ScenarioAssetReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formation: Option<String>,
-    pub start_location: String,
-    pub destination: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formation_ref: Option<ScenarioAssetReference>,
+    pub start_location: ScenarioLocation,
+    pub destination: ScenarioLocation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub departure_time: Option<String>,
 }
 
 impl AiService {
     pub fn consist_id(&self) -> Option<&str> {
-        non_empty_option(self.consist.as_deref())
+        self.consist.as_ref().and_then(ScenarioAssetReference::id)
     }
 
     pub fn formation_id(&self) -> Option<&str> {
         non_empty_option(self.formation.as_deref())
+    }
+
+    pub fn formation_ref_id(&self) -> Option<&str> {
+        self.formation_ref.as_ref().and_then(ScenarioAssetReference::id)
     }
 }
 
@@ -111,7 +256,7 @@ pub struct Objective {
     pub description: String,
     pub kind: ObjectiveKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<String>,
+    pub location: Option<ScenarioLocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
 }
@@ -208,6 +353,12 @@ pub struct RouteProfile {
     pub supported_stock: Vec<String>,
     #[serde(default)]
     pub spawn_points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub player_spawn_points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_locations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objective_locations: Vec<String>,
     #[serde(default)]
     pub templates: Vec<TemplateReference>,
     #[serde(default)]
@@ -225,6 +376,30 @@ impl RouteProfile {
 
     pub fn has_spawn_point(&self, spawn_point_id: &str) -> bool {
         self.spawn_points.iter().any(|spawn_point| spawn_point == spawn_point_id)
+    }
+
+    pub fn has_player_spawn_point(&self, location_id: &str) -> bool {
+        self.has_spawn_point(location_id)
+            || self
+                .player_spawn_points
+                .iter()
+                .any(|spawn_point| spawn_point == location_id)
+    }
+
+    pub fn has_service_location(&self, location_id: &str) -> bool {
+        self.has_player_spawn_point(location_id)
+            || self
+                .service_locations
+                .iter()
+                .any(|location| location == location_id)
+    }
+
+    pub fn has_objective_location(&self, location_id: &str) -> bool {
+        self.has_service_location(location_id)
+            || self
+                .objective_locations
+                .iter()
+                .any(|location| location == location_id)
     }
 
     pub fn supports_template(&self, template_id: &str) -> bool {
@@ -346,6 +521,130 @@ pub struct CompiledFormation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedServiceReferenceKind {
+    Stock,
+    ProjectFormation,
+    CatalogFormation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedServiceReference {
+    pub query: String,
+    pub kind: ResolvedServiceReferenceKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drivable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_vehicles: Vec<ResolvedFormationVehicle>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ambiguous: bool,
+    #[serde(default, skip_serializing_if = "is_zero_or_one")]
+    pub candidate_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledAiServiceReference {
+    pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ResolvedServiceReference>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledResolvedServiceReferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_service: Option<ResolvedServiceReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_services: Vec<CompiledAiServiceReference>,
+}
+
+impl CompiledResolvedServiceReferences {
+    pub fn is_empty(&self) -> bool {
+        self.player_service.is_none() && self.ai_services.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedLocationMatchKind {
+    FrontendSpawnPoint,
+    Station,
+    CatalogEntry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedLocationReference {
+    pub query: String,
+    pub match_kind: ResolvedLocationMatchKind,
+    pub catalog_id: String,
+    pub display_name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ambiguous: bool,
+    #[serde(default, skip_serializing_if = "is_zero_or_one")]
+    pub candidate_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledAiServiceLocations {
+    pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<ResolvedLocationReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ResolvedLocationReference>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledObjectiveLocation {
+    pub objective_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<ResolvedLocationReference>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledResolvedLocations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_start: Option<ResolvedLocationReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_destination: Option<ResolvedLocationReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_services: Vec<CompiledAiServiceLocations>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objectives: Vec<CompiledObjectiveLocation>,
+}
+
+impl CompiledResolvedLocations {
+    pub fn is_empty(&self) -> bool {
+        self.player_start.is_none()
+            && self.player_destination.is_none()
+            && self.ai_services.is_empty()
+            && self.objectives.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledScenario {
     pub schema_version: u32,
@@ -360,6 +659,10 @@ pub struct CompiledScenario {
     pub objectives: Vec<Objective>,
     #[serde(default, skip_serializing_if = "CompletionRules::is_empty")]
     pub completion: CompletionRules,
+    #[serde(default, skip_serializing_if = "CompiledResolvedLocations::is_empty")]
+    pub resolved_locations: CompiledResolvedLocations,
+    #[serde(default, skip_serializing_if = "CompiledResolvedServiceReferences::is_empty")]
+    pub resolved_service_references: CompiledResolvedServiceReferences,
     pub template: CompiledTemplateInfo,
     pub summary: CompiledScenarioSummary,
 }
@@ -409,6 +712,17 @@ fn is_default_cargo_units(value: &u32) -> bool {
     *value == default_cargo_units()
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+fn is_zero_or_one(value: &usize) -> bool {
+    *value <= 1
+}
+
 fn non_empty_option(value: Option<&str>) -> Option<&str> {
     value.filter(|candidate| !candidate.trim().is_empty())
 }
+
+
+

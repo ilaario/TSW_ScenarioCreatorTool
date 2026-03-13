@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 use tsw_scenario_schema::{
     AiService, Condition, ConditionKind, FormationDefinition, FormationEntry, Objective,
-    ObjectiveKind, RouteProfile, ScenarioProject, TemplateDefinition,
+    ObjectiveKind, RouteProfile, ScenarioLocation, ScenarioProject, TemplateDefinition,
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -51,12 +51,12 @@ pub fn validate_project(
     require_non_empty(&mut report, "scenario.template", &project.scenario.template);
     require_non_empty(&mut report, "scenario.start_time", &project.scenario.start_time);
     require_non_empty(&mut report, "scenario.weather", &project.scenario.weather);
-    require_non_empty(
+    require_location_non_empty(
         &mut report,
         "player_service.start_location",
         &project.player_service.start_location,
     );
-    require_non_empty(
+    require_location_non_empty(
         &mut report,
         "player_service.destination",
         &project.player_service.destination,
@@ -72,9 +72,11 @@ pub fn validate_project(
         None,
         project.player_service.consist_id(),
         project.player_service.formation_id(),
+        project.player_service.formation_ref_id(),
         &project.player_service.start_location,
         &project.player_service.destination,
         None,
+        true,
     );
 
     if !project.scenario.route.is_empty() && project.scenario.route != route_profile.id {
@@ -136,7 +138,7 @@ pub fn validate_project(
         ));
     }
 
-    if project.player_service.start_location == project.player_service.destination {
+    if locations_equivalent(&project.player_service.start_location, &project.player_service.destination) {
         report.warnings.push(issue(
             "START_EQUALS_DESTINATION",
             "player_service.destination",
@@ -384,12 +386,12 @@ fn validate_ai_service(
 ) {
     let field_prefix = format!("ai_services[{index}]");
     require_non_empty(report, &format!("{field_prefix}.id"), &ai_service.id);
-    require_non_empty(
+    require_location_non_empty(
         report,
         &format!("{field_prefix}.start_location"),
         &ai_service.start_location,
     );
-    require_non_empty(
+    require_location_non_empty(
         report,
         &format!("{field_prefix}.destination"),
         &ai_service.destination,
@@ -411,9 +413,11 @@ fn validate_ai_service(
         Some(&ai_service.id),
         ai_service.consist_id(),
         ai_service.formation_id(),
+        ai_service.formation_ref_id(),
         &ai_service.start_location,
         &ai_service.destination,
         ai_service.departure_time.as_deref(),
+        false,
     );
 }
 
@@ -443,7 +447,7 @@ fn validate_objective(
     match objective.kind {
         ObjectiveKind::ReachDestination => {}
         ObjectiveKind::StopAt => {
-            if objective.location.as_deref().unwrap_or_default().trim().is_empty() {
+            if objective.location.as_ref().map(|location| location.is_empty()).unwrap_or(true) {
                 report.errors.push(issue(
                     "MISSING_OBJECTIVE_LOCATION",
                     &format!("{field_prefix}.location"),
@@ -462,9 +466,14 @@ fn validate_objective(
         }
     }
 
-    if let Some(location) = objective.location.as_deref() {
-        if !location.trim().is_empty() {
-            validate_spawn_point(report, route_profile, &format!("{field_prefix}.location"), location);
+    if let Some(location) = objective.location.as_ref() {
+        if !location.is_empty() {
+            validate_objective_location(
+                report,
+                route_profile,
+                &format!("{field_prefix}.location"),
+                location,
+            );
         }
     }
 
@@ -585,18 +594,26 @@ fn validate_service(
     service_id: Option<&str>,
     consist: Option<&str>,
     formation: Option<&str>,
-    start_location: &str,
-    destination: &str,
+    formation_ref: Option<&str>,
+    start_location: &ScenarioLocation,
+    destination: &ScenarioLocation,
     departure_time: Option<&str>,
+    is_player_service: bool,
 ) {
-    match (consist, formation) {
-        (Some(consist_id), Some(_)) => {
-            report.errors.push(issue(
-                "AMBIGUOUS_SERVICE_STOCK_REFERENCE",
-                &format!("{field_prefix}.formation"),
-                "services must choose either 'consist' or 'formation'".to_string(),
-            ));
+    let reference_count = usize::from(consist.is_some())
+        + usize::from(formation.is_some())
+        + usize::from(formation_ref.is_some());
 
+    if reference_count > 1 {
+        report.errors.push(issue(
+            "AMBIGUOUS_SERVICE_STOCK_REFERENCE",
+            &format!("{field_prefix}.consist"),
+            "services must choose exactly one of 'consist', 'formation', or 'formation_ref'".to_string(),
+        ));
+    }
+
+    match (consist, formation, formation_ref) {
+        (Some(consist_id), _, _) => {
             if !route_profile.supports_stock(consist_id) {
                 report.errors.push(issue(
                     "INVALID_ROLLING_STOCK",
@@ -608,19 +625,7 @@ fn validate_service(
                 ));
             }
         }
-        (Some(consist_id), None) => {
-            if !route_profile.supports_stock(consist_id) {
-                report.errors.push(issue(
-                    "INVALID_ROLLING_STOCK",
-                    &format!("{field_prefix}.consist"),
-                    format!(
-                        "rolling stock '{}' is not supported by route '{}'",
-                        consist_id, route_profile.id
-                    ),
-                ));
-            }
-        }
-        (None, Some(formation_id)) => match resolved_formations.get(formation_id) {
+        (None, Some(formation_id), None) => match resolved_formations.get(formation_id) {
             Some(resolved) if resolved.is_empty() => report.errors.push(issue(
                 "EMPTY_RESOLVED_FORMATION",
                 &format!("{field_prefix}.formation"),
@@ -633,20 +638,31 @@ fn validate_service(
                 format!("formation '{}' is not defined", formation_id),
             )),
         },
-        (None, None) => report.errors.push(issue(
+        (None, Some(_), Some(_)) => {}
+        (None, None, Some(_)) => {}
+        (None, None, None) => report.errors.push(issue(
             "MISSING_SERVICE_STOCK_REFERENCE",
             &format!("{field_prefix}.consist"),
-            "services must define either 'consist' or 'formation'".to_string(),
+            "services must define one of 'consist', 'formation', or 'formation_ref'".to_string(),
         )),
     }
 
-    validate_spawn_point(
-        report,
-        route_profile,
-        &format!("{field_prefix}.start_location"),
-        start_location,
-    );
-    validate_spawn_point(
+    if is_player_service {
+        validate_player_start_location(
+            report,
+            route_profile,
+            &format!("{field_prefix}.start_location"),
+            start_location,
+        );
+    } else {
+        validate_service_location(
+            report,
+            route_profile,
+            &format!("{field_prefix}.start_location"),
+            start_location,
+        );
+    }
+    validate_service_location(
         report,
         route_profile,
         &format!("{field_prefix}.destination"),
@@ -660,7 +676,7 @@ fn validate_service(
     }
 
     if let Some(service_id) = service_id {
-        if !service_id.trim().is_empty() && start_location == destination {
+        if !service_id.trim().is_empty() && locations_equivalent(start_location, destination) {
             report.warnings.push(issue(
                 "AI_SERVICE_LOOP",
                 &format!("{field_prefix}.destination"),
@@ -673,19 +689,73 @@ fn validate_service(
     }
 }
 
-fn validate_spawn_point(
+fn validate_player_start_location(
     report: &mut ValidationReport,
     route_profile: &RouteProfile,
     field: &str,
-    spawn_point: &str,
+    location: &ScenarioLocation,
 ) {
-    if !spawn_point.trim().is_empty() && !route_profile.has_spawn_point(spawn_point) {
-        report.errors.push(issue(
-            "INVALID_SPAWN_POINT",
+    if location.is_empty() {
+        return;
+    }
+
+    if location_matches_route_profile(location, |value| route_profile.has_player_spawn_point(value)) {
+        return;
+    }
+
+    if location_matches_route_profile(location, |value| route_profile.has_service_location(value)) {
+        report.warnings.push(issue(
+            "PLAYER_START_USES_SERVICE_LOCATION",
             field,
             format!(
-                "spawn point '{}' is not available on route '{}'",
-                spawn_point, route_profile.id
+                "player start location '{}' is known on route '{}' but is not marked as a player/frontend spawn",
+                location.display_label(), route_profile.id
+            ),
+        ));
+        return;
+    }
+
+    report.errors.push(issue(
+        "INVALID_PLAYER_START_LOCATION",
+        field,
+        format!(
+            "player start location '{}' is not available on route '{}'",
+            location.display_label(), route_profile.id
+        ),
+    ));
+}
+
+fn validate_service_location(
+    report: &mut ValidationReport,
+    route_profile: &RouteProfile,
+    field: &str,
+    location: &ScenarioLocation,
+) {
+    if !location.is_empty() && !location_matches_route_profile(location, |value| route_profile.has_service_location(value)) {
+        report.errors.push(issue(
+            "INVALID_SERVICE_LOCATION",
+            field,
+            format!(
+                "service location '{}' is not available on route '{}'",
+                location.display_label(), route_profile.id
+            ),
+        ));
+    }
+}
+
+fn validate_objective_location(
+    report: &mut ValidationReport,
+    route_profile: &RouteProfile,
+    field: &str,
+    location: &ScenarioLocation,
+) {
+    if !location.is_empty() && !location_matches_route_profile(location, |value| route_profile.has_objective_location(value)) {
+        report.errors.push(issue(
+            "INVALID_OBJECTIVE_LOCATION",
+            field,
+            format!(
+                "objective location '{}' is not available on route '{}'",
+                location.display_label(), route_profile.id
             ),
         ));
     }
@@ -709,6 +779,41 @@ fn require_non_empty(report: &mut ValidationReport, field: &str, value: &str) {
             format!("required field '{field}' cannot be empty"),
         ));
     }
+}
+
+fn require_location_non_empty(
+    report: &mut ValidationReport,
+    field: &str,
+    location: &ScenarioLocation,
+) {
+    if location.is_empty() {
+        report.errors.push(issue(
+            "MISSING_REQUIRED_FIELD",
+            field,
+            format!("required field '{field}' cannot be empty"),
+        ));
+    }
+}
+
+fn location_matches_route_profile(
+    location: &ScenarioLocation,
+    predicate: impl Fn(&str) -> bool,
+) -> bool {
+    [
+        location.name(),
+        location.spawn_tag(),
+        location.catalog_id(),
+        location.internal_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(predicate)
+}
+
+fn locations_equivalent(left: &ScenarioLocation, right: &ScenarioLocation) -> bool {
+    let left_primary = left.primary_value();
+    let right_primary = right.primary_value();
+    left_primary.is_some() && left_primary == right_primary
 }
 
 fn issue(code: &str, field: &str, message: String) -> ValidationIssue {
@@ -742,7 +847,8 @@ fn is_valid_time_format(value: &str) -> bool {
 mod tests {
     use super::*;
     use tsw_scenario_schema::{
-        CompletionRules, Condition, Meta, Objective, PlayerService, Scenario, TemplateReference,
+        CompletionRules, Condition, Meta, Objective, PlayerService, Scenario, ScenarioLocation,
+        TemplateReference,
     };
 
     fn sample_project() -> ScenarioProject {
@@ -777,15 +883,17 @@ mod tests {
             player_service: PlayerService {
                 consist: None,
                 formation: Some("player_train".to_string()),
-                start_location: "Essen_Hbf_P5".to_string(),
-                destination: "Bochum_Hbf_P3".to_string(),
+                formation_ref: None,
+                start_location: ScenarioLocation::Simple("Essen_Hbf_P5".to_string()),
+                destination: ScenarioLocation::Simple("Bochum_Hbf_P3".to_string()),
             },
             ai_services: vec![AiService {
                 id: "ai_regional_01".to_string(),
-                consist: Some("DB_BR422".to_string()),
+                consist: Some(tsw_scenario_schema::ScenarioAssetReference::Simple("DB_BR422".to_string())),
                 formation: None,
-                start_location: "Bochum_Hbf_P3".to_string(),
-                destination: "Essen_Hbf_P5".to_string(),
+                formation_ref: None,
+                start_location: ScenarioLocation::Simple("Bochum_Hbf_P3".to_string()),
+                destination: ScenarioLocation::Simple("Essen_Hbf_P5".to_string()),
                 departure_time: Some("08:05".to_string()),
             }],
             objectives: vec![
@@ -793,7 +901,7 @@ mod tests {
                     id: "stop_bochum".to_string(),
                     description: "Reach Bochum Hbf".to_string(),
                     kind: ObjectiveKind::StopAt,
-                    location: Some("Bochum_Hbf_P3".to_string()),
+                    location: Some(ScenarioLocation::Simple("Bochum_Hbf_P3".to_string())),
                     time: None,
                 },
                 Objective {
@@ -831,6 +939,9 @@ mod tests {
             game_version: Some("tsw5".to_string()),
             supported_stock: vec!["DB_BR422".to_string()],
             spawn_points: vec!["Essen_Hbf_P5".to_string(), "Bochum_Hbf_P3".to_string()],
+            player_spawn_points: Vec::new(),
+            service_locations: Vec::new(),
+            objective_locations: Vec::new(),
             templates: vec![TemplateReference::Id("commuter_simple".to_string())],
             supported_weather: vec!["clear".to_string(), "cloudy".to_string()],
             install_ids: vec!["RuhrSiegNord".to_string()],
@@ -910,10 +1021,34 @@ mod tests {
             .any(|issue| issue.code == "UNKNOWN_OBJECTIVE_REFERENCE"));
     }
 
+
+    #[test]
+    fn warns_when_player_start_uses_service_location_only() {
+        let mut project = sample_project();
+        project.player_service.start_location = ScenarioLocation::Simple("Bochum_Hbf_P3".to_string());
+        project.player_service.destination = ScenarioLocation::Simple("Essen_Hbf_P5".to_string());
+
+        let mut route_profile = sample_route_profile();
+        route_profile.spawn_points = Vec::new();
+        route_profile.player_spawn_points = vec!["Essen_Hbf_P5".to_string()];
+        route_profile.service_locations = vec![
+            "Bochum_Hbf_P3".to_string(),
+            "Essen_Hbf_P5".to_string(),
+        ];
+        route_profile.objective_locations = vec!["Bochum_Hbf_P3".to_string()];
+
+        let report = validate_project(&project, &route_profile, &sample_template_definition());
+
+        assert!(report.is_valid());
+        assert!(report
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "PLAYER_START_USES_SERVICE_LOCATION"));
+    }
     #[test]
     fn rejects_services_that_define_both_consist_and_formation() {
         let mut project = sample_project();
-        project.player_service.consist = Some("DB_BR422".to_string());
+        project.player_service.consist = Some(tsw_scenario_schema::ScenarioAssetReference::Simple("DB_BR422".to_string()));
 
         let report = validate_project(
             &project,

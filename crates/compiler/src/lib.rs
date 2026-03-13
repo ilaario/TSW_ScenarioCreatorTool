@@ -5,10 +5,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tsw_scenario_core::{resolve_project_root, resolve_relative_to, TemplateBundle};
+use tsw_scenario_scanner::{
+    resolve_formation_reference_matches, resolve_location_reference_matches,
+    resolve_stock_reference_matches, FormationCatalog, FormationMatchConstraints,
+    LocationCatalog, LocationLookupUsage, LocationMatchConstraints, LocationMatchKind,
+    StockCatalog, StockMatchConstraints,
+};
 use tsw_scenario_schema::{
-    CompiledFormation, CompiledScenario, CompiledScenarioSummary, CompiledTemplateInfo,
-    FormationDefinition, PackageEntry, PackageEntryKind, PackagePlan, ResolvedFormationVehicle,
-    ScenarioProject,
+    CompiledAiServiceLocations, CompiledAiServiceReference, CompiledFormation,
+    CompiledObjectiveLocation, CompiledResolvedLocations, CompiledResolvedServiceReferences,
+    CompiledScenario, CompiledScenarioSummary, CompiledTemplateInfo, FormationDefinition,
+    PackageEntry, PackageEntryKind, PackagePlan, ResolvedFormationVehicle,
+    ResolvedLocationMatchKind, ResolvedLocationReference, ResolvedServiceReference,
+    ResolvedServiceReferenceKind, ScenarioAssetReference, ScenarioLocation, ScenarioProject,
 };
 
 #[derive(Debug, Clone)]
@@ -18,6 +27,9 @@ pub struct BuildOptions {
     pub game_version: String,
     pub clean: bool,
     pub package_namespace: String,
+    pub location_catalog: Option<LocationCatalog>,
+    pub stock_catalog: Option<StockCatalog>,
+    pub formation_catalog: Option<FormationCatalog>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +86,13 @@ pub fn compile_project(
     let template_output_dir = build_dir.join(template_bundle.definition.output_subdir());
     copy_template_directory(project, template_bundle, &template_output_dir)?;
 
-    let compiled_scenario = build_compiled_scenario(project, template_bundle)?;
+    let compiled_scenario = build_compiled_scenario(
+        project,
+        template_bundle,
+        options.location_catalog.as_ref(),
+        options.stock_catalog.as_ref(),
+        options.formation_catalog.as_ref(),
+    )?;
     let manifest_path = build_dir.join("manifest.json");
     let scenario_path = build_dir.join("scenario.yaml");
     let compiled_scenario_path = build_dir.join("compiled_scenario.json");
@@ -136,6 +154,7 @@ fn build_manifest(
         consist: service_reference_label(
             project.player_service.consist_id(),
             project.player_service.formation_id(),
+            project.player_service.formation_ref_id(),
         ),
         formation_count: summary.formation_count,
         ai_service_count: summary.ai_service_count,
@@ -150,8 +169,18 @@ fn build_manifest(
 fn build_compiled_scenario(
     project: &ScenarioProject,
     template_bundle: &TemplateBundle,
+    location_catalog: Option<&LocationCatalog>,
+    stock_catalog: Option<&StockCatalog>,
+    formation_catalog: Option<&FormationCatalog>,
 ) -> Result<CompiledScenario> {
     let compiled_formations = build_compiled_formations(&project.formations)?;
+    let resolved_locations = build_resolved_locations(project, location_catalog);
+    let resolved_service_references = build_resolved_service_references(
+        project,
+        &compiled_formations,
+        stock_catalog,
+        formation_catalog,
+    )?;
 
     Ok(CompiledScenario {
         schema_version: 1,
@@ -162,6 +191,8 @@ fn build_compiled_scenario(
         formations: compiled_formations,
         objectives: project.objectives.clone(),
         completion: project.completion.clone(),
+        resolved_locations,
+        resolved_service_references,
         template: CompiledTemplateInfo {
             id: template_bundle.definition.id.clone(),
             name: template_bundle.definition.name.clone(),
@@ -175,6 +206,343 @@ fn build_compiled_scenario(
             failure_condition_count: project.completion.failure.len(),
         },
     })
+}
+
+fn build_resolved_locations(
+    project: &ScenarioProject,
+    location_catalog: Option<&LocationCatalog>,
+) -> CompiledResolvedLocations {
+    let Some(location_catalog) = location_catalog else {
+        return CompiledResolvedLocations::default();
+    };
+
+    let player_start = resolve_location_reference(
+        location_catalog,
+        &project.player_service.start_location,
+        LocationLookupUsage::PlayerSpawn,
+    );
+    let player_destination = resolve_location_reference(
+        location_catalog,
+        &project.player_service.destination,
+        LocationLookupUsage::Service,
+    );
+
+    let ai_services = project
+        .ai_services
+        .iter()
+        .map(|service| CompiledAiServiceLocations {
+            service_id: service.id.clone(),
+            start: resolve_location_reference(
+                location_catalog,
+                &service.start_location,
+                LocationLookupUsage::Service,
+            ),
+            destination: resolve_location_reference(
+                location_catalog,
+                &service.destination,
+                LocationLookupUsage::Service,
+            ),
+        })
+        .collect();
+
+    let objectives = project
+        .objectives
+        .iter()
+        .filter_map(|objective| {
+            objective.location.as_ref().map(|location| CompiledObjectiveLocation {
+                objective_id: objective.id.clone(),
+                location: resolve_location_reference(
+                    location_catalog,
+                    location,
+                    LocationLookupUsage::Objective,
+                ),
+            })
+        })
+        .collect();
+
+    CompiledResolvedLocations {
+        player_start,
+        player_destination,
+        ai_services,
+        objectives,
+    }
+}
+
+fn resolve_location_reference(
+    location_catalog: &LocationCatalog,
+    location: &ScenarioLocation,
+    usage: LocationLookupUsage,
+) -> Option<ResolvedLocationReference> {
+    let query = location.name().or_else(|| location.primary_value());
+    let constraints = location_match_constraints(location);
+    let matches = resolve_location_reference_matches(location_catalog, query, usage, &constraints);
+    let selected = matches.first()?;
+
+    Some(ResolvedLocationReference {
+        query: location.display_label(),
+        match_kind: resolved_location_match_kind(selected.match_kind),
+        catalog_id: selected.catalog_id.clone(),
+        display_name: selected.display_name.clone(),
+        kind: selected.kind.clone(),
+        spawn_tag: selected.spawn_tag.clone(),
+        internal_ref: selected.internal_ref.clone(),
+        source_kind: selected.source_kind.map(location_source_kind_label),
+        confidence: Some(location_confidence_label(selected.confidence).to_string()),
+        source: selected.source.clone(),
+        ambiguous: matches.len() > 1,
+        candidate_count: matches.len(),
+    })
+}
+
+fn location_match_constraints(location: &ScenarioLocation) -> LocationMatchConstraints {
+    LocationMatchConstraints {
+        catalog_id: location.catalog_id().map(str::to_string),
+        spawn_tag: location.spawn_tag().map(str::to_string),
+        internal_ref: location.internal_ref().map(str::to_string),
+    }
+}
+
+fn resolved_location_match_kind(match_kind: LocationMatchKind) -> ResolvedLocationMatchKind {
+    match match_kind {
+        LocationMatchKind::FrontendSpawnPoint => ResolvedLocationMatchKind::FrontendSpawnPoint,
+        LocationMatchKind::Station => ResolvedLocationMatchKind::Station,
+        LocationMatchKind::CatalogEntry => ResolvedLocationMatchKind::CatalogEntry,
+    }
+}
+
+fn location_source_kind_label(source_kind: tsw_scenario_scanner::LocationSourceKind) -> String {
+    match source_kind {
+        tsw_scenario_scanner::LocationSourceKind::FrontendSpawnPoint => "frontend_spawn_point",
+        tsw_scenario_scanner::LocationSourceKind::RouteDefinition => "route_definition",
+        tsw_scenario_scanner::LocationSourceKind::Timetable => "timetable",
+        tsw_scenario_scanner::LocationSourceKind::Scenario => "scenario",
+        tsw_scenario_scanner::LocationSourceKind::Training => "training",
+        tsw_scenario_scanner::LocationSourceKind::Localization => "localization",
+        tsw_scenario_scanner::LocationSourceKind::Unknown => "unknown",
+    }
+    .to_string()
+}
+
+fn location_confidence_label(confidence: tsw_scenario_scanner::LocationConfidence) -> &'static str {
+    match confidence {
+        tsw_scenario_scanner::LocationConfidence::High => "high",
+        tsw_scenario_scanner::LocationConfidence::Medium => "medium",
+        tsw_scenario_scanner::LocationConfidence::Low => "low",
+    }
+}
+
+fn build_resolved_service_references(
+    project: &ScenarioProject,
+    compiled_formations: &[CompiledFormation],
+    stock_catalog: Option<&StockCatalog>,
+    formation_catalog: Option<&FormationCatalog>,
+) -> Result<CompiledResolvedServiceReferences> {
+    let player_service = resolve_service_reference(
+        project.player_service.consist.as_ref(),
+        project.player_service.formation_id(),
+        project.player_service.formation_ref.as_ref(),
+        compiled_formations,
+        stock_catalog,
+        formation_catalog,
+    )?;
+
+    let mut ai_services = Vec::new();
+    for service in &project.ai_services {
+        ai_services.push(CompiledAiServiceReference {
+            service_id: service.id.clone(),
+            reference: resolve_service_reference(
+                service.consist.as_ref(),
+                service.formation_id(),
+                service.formation_ref.as_ref(),
+                compiled_formations,
+                stock_catalog,
+                formation_catalog,
+            )?,
+        });
+    }
+
+    Ok(CompiledResolvedServiceReferences {
+        player_service,
+        ai_services,
+    })
+}
+
+fn resolve_service_reference(
+    consist: Option<&ScenarioAssetReference>,
+    formation: Option<&str>,
+    formation_ref: Option<&ScenarioAssetReference>,
+    compiled_formations: &[CompiledFormation],
+    stock_catalog: Option<&StockCatalog>,
+    formation_catalog: Option<&FormationCatalog>,
+) -> Result<Option<ResolvedServiceReference>> {
+    if let Some(consist) = consist {
+        return Ok(Some(resolve_stock_reference(consist, stock_catalog)));
+    }
+
+    if let Some(formation_id) = formation {
+        return Ok(Some(resolve_project_formation_reference(
+            formation_id,
+            compiled_formations,
+        )));
+    }
+
+    if let Some(formation_ref) = formation_ref {
+        return resolve_catalog_formation_reference(
+            formation_ref,
+            formation_catalog,
+        )
+        .map(Some);
+    }
+
+    Ok(None)
+}
+
+fn resolve_stock_reference(
+    reference: &ScenarioAssetReference,
+    stock_catalog: Option<&StockCatalog>,
+) -> ResolvedServiceReference {
+    let query = reference.display_label();
+    let fallback_id = reference.id().unwrap_or_default().to_string();
+
+    if let Some(stock_catalog) = stock_catalog {
+        let matches = resolve_stock_reference_matches(
+            stock_catalog,
+            reference.id().unwrap_or_default(),
+            &stock_match_constraints(reference),
+        );
+        if let Some(selected) = matches.first() {
+            return ResolvedServiceReference {
+                query,
+                kind: ResolvedServiceReferenceKind::Stock,
+                id: selected.id.clone(),
+                plugin: selected.plugin.clone(),
+                source: selected.source.clone(),
+                evidence: Some(selected.evidence.clone()),
+                drivable: None,
+                resolved_vehicles: Vec::new(),
+                ambiguous: matches.len() > 1,
+                candidate_count: matches.len(),
+            };
+        }
+    }
+
+    ResolvedServiceReference {
+        query,
+        kind: ResolvedServiceReferenceKind::Stock,
+        id: fallback_id,
+        plugin: reference.plugin().map(str::to_string),
+        source: reference.source().unwrap_or("scenario").to_string(),
+        evidence: None,
+        drivable: None,
+        resolved_vehicles: Vec::new(),
+        ambiguous: false,
+        candidate_count: 0,
+    }
+}
+
+fn resolve_project_formation_reference(
+    formation_id: &str,
+    compiled_formations: &[CompiledFormation],
+) -> ResolvedServiceReference {
+    let resolved_vehicles = compiled_formations
+        .iter()
+        .find(|candidate| candidate.id.eq_ignore_ascii_case(formation_id))
+        .map(|candidate| candidate.resolved_vehicles.clone())
+        .unwrap_or_default();
+
+    ResolvedServiceReference {
+        query: formation_id.to_string(),
+        kind: ResolvedServiceReferenceKind::ProjectFormation,
+        id: formation_id.to_string(),
+        plugin: None,
+        source: "project".to_string(),
+        evidence: None,
+        drivable: None,
+        resolved_vehicles,
+        ambiguous: false,
+        candidate_count: 0,
+    }
+}
+
+fn resolve_catalog_formation_reference(
+    reference: &ScenarioAssetReference,
+    formation_catalog: Option<&FormationCatalog>,
+) -> Result<ResolvedServiceReference> {
+    let query = reference.display_label();
+    let fallback_id = reference.id().unwrap_or_default().to_string();
+
+    if let Some(formation_catalog) = formation_catalog {
+        let matches = resolve_formation_reference_matches(
+            formation_catalog,
+            reference.id().unwrap_or_default(),
+            &formation_match_constraints(reference),
+        );
+        if let Some(selected) = matches.first() {
+            return Ok(ResolvedServiceReference {
+                query,
+                kind: ResolvedServiceReferenceKind::CatalogFormation,
+                id: selected.id.clone(),
+                plugin: selected.plugin.clone(),
+                source: selected.source.clone(),
+                evidence: None,
+                drivable: selected.drivable,
+                resolved_vehicles: flattened_catalog_formation_vehicles(
+                    formation_catalog,
+                    &selected.id,
+                )?,
+                ambiguous: matches.len() > 1,
+                candidate_count: matches.len(),
+            });
+        }
+    }
+
+    Ok(ResolvedServiceReference {
+        query,
+        kind: ResolvedServiceReferenceKind::CatalogFormation,
+        id: fallback_id,
+        plugin: reference.plugin().map(str::to_string),
+        source: reference.source().unwrap_or("scenario").to_string(),
+        evidence: None,
+        drivable: None,
+        resolved_vehicles: Vec::new(),
+        ambiguous: false,
+        candidate_count: 0,
+    })
+}
+
+fn flattened_catalog_formation_vehicles(
+    formation_catalog: &FormationCatalog,
+    formation_id: &str,
+) -> Result<Vec<ResolvedFormationVehicle>> {
+    let flattened = tsw_scenario_scanner::resolve_flattened_formation_entries(
+        formation_catalog,
+        formation_id,
+    )?;
+    Ok(flattened
+        .into_iter()
+        .map(|vehicle| ResolvedFormationVehicle {
+            vehicle: vehicle.vehicle_id,
+            flipped: vehicle.flipped,
+            cargo: vehicle.cargo_asset.map(|asset| tsw_scenario_schema::FormationCargo {
+                asset,
+                units: vehicle.cargo_units.unwrap_or(1),
+            }),
+        })
+        .collect())
+}
+
+fn stock_match_constraints(reference: &ScenarioAssetReference) -> StockMatchConstraints {
+    StockMatchConstraints {
+        plugin: reference.plugin().map(str::to_string),
+        source: reference.source().map(str::to_string),
+    }
+}
+
+fn formation_match_constraints(reference: &ScenarioAssetReference) -> FormationMatchConstraints {
+    FormationMatchConstraints {
+        plugin: reference.plugin().map(str::to_string),
+        source: reference.source().map(str::to_string),
+    }
 }
 
 fn build_compiled_formations(
@@ -553,6 +921,7 @@ fn render_tokens(input: &str, project: &ScenarioProject, template_bundle: &Templ
             service_reference_label(
                 project.player_service.consist_id(),
                 project.player_service.formation_id(),
+                project.player_service.formation_ref_id(),
             ),
         ),
         (
@@ -560,16 +929,17 @@ fn render_tokens(input: &str, project: &ScenarioProject, template_bundle: &Templ
             project
                 .player_service
                 .formation_id()
+                .or_else(|| project.player_service.formation_ref_id())
                 .unwrap_or_default()
                 .to_string(),
         ),
         (
             "{{player_service.start_location}}".to_string(),
-            project.player_service.start_location.clone(),
+            project.player_service.start_location.display_label(),
         ),
         (
             "{{player_service.destination}}".to_string(),
-            project.player_service.destination.clone(),
+            project.player_service.destination.display_label(),
         ),
         ("{{template.name}}".to_string(), template_bundle.definition.name.clone()),
         (
@@ -601,11 +971,17 @@ fn render_tokens(input: &str, project: &ScenarioProject, template_bundle: &Templ
     rendered
 }
 
-fn service_reference_label(consist: Option<&str>, formation: Option<&str>) -> String {
+fn service_reference_label(
+    consist: Option<&str>,
+    formation: Option<&str>,
+    formation_ref: Option<&str>,
+) -> String {
     if let Some(consist_id) = consist {
         consist_id.to_string()
     } else if let Some(formation_id) = formation {
         format!("formation:{formation_id}")
+    } else if let Some(formation_id) = formation_ref {
+        format!("catalog_formation:{formation_id}")
     } else {
         "unknown".to_string()
     }
@@ -644,10 +1020,14 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tsw_scenario_core::TemplateBundle;
+    use tsw_scenario_scanner::{
+        FrontendSpawnPoint, LocationAllowedUse, LocationCatalog, LocationCatalogEntry,
+        LocationCatalogStation, LocationCatalogSummary, LocationConfidence, LocationSourceKind,
+    };
     use tsw_scenario_schema::{
         AiService, CompletionRules, Condition, ConditionKind, FormationDefinition,
-        FormationEntry, Meta, Objective, ObjectiveKind, PlayerService, Scenario, ScenarioProject,
-        TemplateDefinition,
+        FormationEntry, Meta, Objective, ObjectiveKind, PlayerService, Scenario,
+        ScenarioLocation, ScenarioLocationReference, ScenarioProject, TemplateDefinition,
     };
 
     fn temp_workspace(name: &str) -> PathBuf {
@@ -692,22 +1072,24 @@ mod tests {
             player_service: PlayerService {
                 consist: None,
                 formation: Some("player_train".to_string()),
-                start_location: "Essen_Hbf_P5".to_string(),
-                destination: "Bochum_Hbf_P3".to_string(),
+                formation_ref: None,
+                start_location: ScenarioLocation::Simple("Essen_Hbf_P5".to_string()),
+                destination: ScenarioLocation::Simple("Bochum_Hbf_P3".to_string()),
             },
             ai_services: vec![AiService {
                 id: "ai_regional_01".to_string(),
-                consist: Some("DB_BR422".to_string()),
+                consist: Some(tsw_scenario_schema::ScenarioAssetReference::Simple("DB_BR422".to_string())),
                 formation: None,
-                start_location: "Bochum_Hbf_P3".to_string(),
-                destination: "Essen_Hbf_P5".to_string(),
+                formation_ref: None,
+                start_location: ScenarioLocation::Simple("Bochum_Hbf_P3".to_string()),
+                destination: ScenarioLocation::Simple("Essen_Hbf_P5".to_string()),
                 departure_time: Some("08:05".to_string()),
             }],
             objectives: vec![Objective {
                 id: "stop_bochum".to_string(),
                 description: "Reach Bochum Hbf".to_string(),
                 kind: ObjectiveKind::StopAt,
-                location: Some("Bochum_Hbf_P3".to_string()),
+                location: Some(ScenarioLocation::Simple("Bochum_Hbf_P3".to_string())),
                 time: None,
             }],
             completion: CompletionRules {
@@ -763,6 +1145,9 @@ mod tests {
                 game_version: "tsw5".to_string(),
                 clean: true,
                 package_namespace: "ScenarioMods/Test".to_string(),
+                location_catalog: None,
+                stock_catalog: None,
+                formation_catalog: None,
             },
         )
         .expect("build should succeed");
@@ -808,5 +1193,203 @@ mod tests {
         assert!(staged_compiled.exists());
         assert!(build_output.manifest_path.exists());
         assert!(build_output.scenario_path.exists());
+    }
+    #[test]
+    fn compiled_scenario_includes_resolved_locations_from_catalog() {
+        let workspace = temp_workspace("compiler_locations");
+        let template_root = workspace.join("templates").join("commuter_simple");
+        fs::create_dir_all(&template_root).expect("failed to create template root");
+        fs::write(
+            template_root.join("template.yaml"),
+            "id: commuter_simple\nname: Commuter Simple\noutput_subdir: generated\nrender_extensions:\n  - yaml\n",
+        )
+        .expect("failed to write template definition");
+
+        let location_catalog = LocationCatalog {
+            schema_version: 2,
+            route_id: "RRO".to_string(),
+            route_overview: None,
+            stations: vec![LocationCatalogStation {
+                id: "essen_hbf".to_string(),
+                display_name: "Essen Hbf".to_string(),
+                confidence: LocationConfidence::High,
+                allowed_uses: vec![LocationAllowedUse::PlayerSpawn],
+                tags: vec!["Essen_Hbf_P5".to_string()],
+                frontend_spawn_points: vec![FrontendSpawnPoint {
+                    tag: "Essen_Hbf_P5".to_string(),
+                    display_name: "Essen Hbf".to_string(),
+                    available_in_frontend: true,
+                    available_in_fast_travel: true,
+                    source: "test".to_string(),
+                }],
+                locations: Vec::new(),
+            }],
+            ungrouped_locations: vec![LocationCatalogEntry {
+                id: "bochum_hbf_p3".to_string(),
+                display_name: "Bochum_Hbf_P3".to_string(),
+                kind: "platform".to_string(),
+                source_kind: LocationSourceKind::Timetable,
+                confidence: LocationConfidence::High,
+                allowed_uses: vec![
+                    LocationAllowedUse::ServiceStart,
+                    LocationAllowedUse::ServiceEnd,
+                    LocationAllowedUse::ObjectiveLocation,
+                ],
+                internal_ref: Some("BOCHUM_RIBBON_P3".to_string()),
+                source: "test".to_string(),
+            }],
+            summary: LocationCatalogSummary {
+                station_count: 1,
+                frontend_spawn_point_count: 1,
+                grouped_location_count: 0,
+                ungrouped_location_count: 1,
+            },
+        };
+
+        let build_output = compile_project(
+            &sample_project(),
+            &TemplateBundle {
+                root_dir: template_root,
+                definition: TemplateDefinition {
+                    id: "commuter_simple".to_string(),
+                    name: "Commuter Simple".to_string(),
+                    description: None,
+                    output_subdir: Some("generated".to_string()),
+                    render_extensions: vec!["yaml".to_string()],
+                },
+            },
+            &BuildOptions {
+                project_root: workspace.clone(),
+                output_root: PathBuf::from("build"),
+                game_version: "tsw5".to_string(),
+                clean: true,
+                package_namespace: "ScenarioMods/Test".to_string(),
+                location_catalog: Some(location_catalog),
+                stock_catalog: None,
+                formation_catalog: None,
+            },
+        )
+        .expect("build should succeed");
+
+        let compiled_json = fs::read_to_string(&build_output.compiled_scenario_path)
+            .expect("failed to read compiled scenario json");
+        assert!(compiled_json.contains("\"resolved_locations\""));
+        assert!(compiled_json.contains("\"spawn_tag\": \"Essen_Hbf_P5\""));
+        assert!(compiled_json.contains("\"internal_ref\": \"BOCHUM_RIBBON_P3\""));
+    }
+
+    #[test]
+    fn compiled_scenario_uses_explicit_location_selectors() {
+        let workspace = temp_workspace("compiler_structured_locations");
+        let template_root = workspace.join("templates").join("commuter_simple");
+        fs::create_dir_all(&template_root).expect("failed to create template root");
+        fs::write(
+            template_root.join("template.yaml"),
+            "id: commuter_simple\nname: Commuter Simple\noutput_subdir: generated\nrender_extensions:\n  - yaml\n",
+        )
+        .expect("failed to write template definition");
+
+        let mut project = sample_project();
+        project.player_service.destination = ScenarioLocation::Detailed(ScenarioLocationReference {
+            name: Some("Shared Track".to_string()),
+            catalog_id: None,
+            spawn_tag: None,
+            internal_ref: Some("RIBBON_B".to_string()),
+        });
+        project.objectives[0].location = Some(ScenarioLocation::Detailed(ScenarioLocationReference {
+            name: Some("Shared Track".to_string()),
+            catalog_id: None,
+            spawn_tag: None,
+            internal_ref: Some("RIBBON_B".to_string()),
+        }));
+
+        let location_catalog = LocationCatalog {
+            schema_version: 2,
+            route_id: "RRO".to_string(),
+            route_overview: None,
+            stations: vec![LocationCatalogStation {
+                id: "essen_hbf".to_string(),
+                display_name: "Essen Hbf".to_string(),
+                confidence: LocationConfidence::High,
+                allowed_uses: vec![LocationAllowedUse::PlayerSpawn],
+                tags: vec!["Essen_Hbf_P5".to_string()],
+                frontend_spawn_points: vec![FrontendSpawnPoint {
+                    tag: "Essen_Hbf_P5".to_string(),
+                    display_name: "Essen Hbf".to_string(),
+                    available_in_frontend: true,
+                    available_in_fast_travel: true,
+                    source: "test".to_string(),
+                }],
+                locations: Vec::new(),
+            }],
+            ungrouped_locations: vec![
+                LocationCatalogEntry {
+                    id: "shared_track_a".to_string(),
+                    display_name: "Shared Track".to_string(),
+                    kind: "track".to_string(),
+                    source_kind: LocationSourceKind::Timetable,
+                    confidence: LocationConfidence::High,
+                    allowed_uses: vec![
+                        LocationAllowedUse::ServiceStart,
+                        LocationAllowedUse::ServiceEnd,
+                        LocationAllowedUse::ObjectiveLocation,
+                    ],
+                    internal_ref: Some("RIBBON_A".to_string()),
+                    source: "test".to_string(),
+                },
+                LocationCatalogEntry {
+                    id: "shared_track_b".to_string(),
+                    display_name: "Shared Track".to_string(),
+                    kind: "track".to_string(),
+                    source_kind: LocationSourceKind::Scenario,
+                    confidence: LocationConfidence::Medium,
+                    allowed_uses: vec![
+                        LocationAllowedUse::ServiceStart,
+                        LocationAllowedUse::ServiceEnd,
+                        LocationAllowedUse::ObjectiveLocation,
+                    ],
+                    internal_ref: Some("RIBBON_B".to_string()),
+                    source: "test".to_string(),
+                },
+            ],
+            summary: LocationCatalogSummary {
+                station_count: 1,
+                frontend_spawn_point_count: 1,
+                grouped_location_count: 0,
+                ungrouped_location_count: 2,
+            },
+        };
+
+        let build_output = compile_project(
+            &project,
+            &TemplateBundle {
+                root_dir: template_root,
+                definition: TemplateDefinition {
+                    id: "commuter_simple".to_string(),
+                    name: "Commuter Simple".to_string(),
+                    description: None,
+                    output_subdir: Some("generated".to_string()),
+                    render_extensions: vec!["yaml".to_string()],
+                },
+            },
+            &BuildOptions {
+                project_root: workspace.clone(),
+                output_root: PathBuf::from("build"),
+                game_version: "tsw5".to_string(),
+                clean: true,
+                package_namespace: "ScenarioMods/Test".to_string(),
+                location_catalog: Some(location_catalog),
+                stock_catalog: None,
+                formation_catalog: None,
+            },
+        )
+        .expect("build should succeed");
+
+        let compiled_json = fs::read_to_string(&build_output.compiled_scenario_path)
+            .expect("failed to read compiled scenario json");
+        assert!(compiled_json.contains("\"query\": \"Shared Track\""));
+        assert!(compiled_json.contains("\"catalog_id\": \"shared_track_b\""));
+        assert!(compiled_json.contains("\"internal_ref\": \"RIBBON_B\""));
+        assert!(!compiled_json.contains("\"ambiguous\": true"));
     }
 }

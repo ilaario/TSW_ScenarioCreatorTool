@@ -1,0 +1,62 @@
+meta:
+  id: ftf_br111_morning_precise_001
+  title: 111 Hanau to Frankfurt Morning Peak (Precise)
+  author: Dario
+
+scenario:
+  route: FrankfurtFulda
+  template: commuter_simple
+  start_time: "06:05"
+  weather: cloudy
+
+formations:
+  br111_push_pull:
+    entries:
+      - vehicle: FTF_DB_BR111
+      - vehicle: FTF_DB_NWagen
+        count: 3
+      - vehicle: FTF_DB_Bnrdzf_463
+        flipped: true
+
+player_service:
+  formation: br111_push_pull
+  start_location: Hanau Hbf Pl 6
+  destination:
+    name: Frankfurt (Main) Hbf Pl 2
+    internal_ref: 2FE008C5-4F8121B6-AD8F088A-695B7B33
+
+ai_services:
+  - id: ai_br111_return
+    formation: br111_push_pull
+    start_location:
+      name: Frankfurt (Main) Hbf Pl 1
+      internal_ref: A3B56CB1-48533830-AC396E8B-E91C2E31
+    destination:
+      name: Hanau Hbf Pl 5
+      internal_ref: 473164FC-4F15D6EF-C86DBCAE-D12D06B9
+    departure_time: "06:12"
+
+objectives:
+  - id: stop_offenbach_hbf
+    description: Call at Offenbach Hbf platform 2
+    kind: stop_at
+    location:
+      name: Offenbach Hbf Pl 2
+      internal_ref: 230DA58A-411FB19E-1CC5838B-A66382FA
+  - id: stop_frankfurt_sud
+    description: Call at Frankfurt (Main) Sud platform 4
+    kind: stop_at
+    location: Frankfurt (Main) Sud Pl 4
+  - id: arrive_hbf
+    description: Arrive in Frankfurt before 06:42
+    kind: arrive_by
+    time: "06:42"
+
+completion:
+  success:
+    - kind: all_objectives_completed
+      description: Complete the BR111 stopping service on time
+  failure:
+    - kind: time_reached
+      time: "06:50"
+      description: Service delay exceeded the scenario window

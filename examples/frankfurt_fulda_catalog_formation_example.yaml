@@ -1,0 +1,39 @@
+meta:
+  id: ftf_ice_t_catalog_001
+  title: ICE-T Hanau to Fulda (Catalog Formation)
+  author: Dario
+
+scenario:
+  route: FrankfurtFulda
+  template: commuter_simple
+  start_time: "06:20"
+  weather: cloudy
+
+player_service:
+  formation_ref:
+    id: FRM_FTF_DB_BR411
+    plugin: FTF_DB_BR411
+  start_location:
+    name: Hanau Hbf
+    spawn_tag: Hanau Hbf
+  destination:
+    name: Fulda Platform 1
+    internal_ref: 7AEE42F0-4C8F92AE-E4267099-250DBBF9
+
+objectives:
+  - id: arrive_fulda
+    description: Arrive in Fulda before 07:12
+    kind: arrive_by
+    location:
+      name: Fulda Platform 1
+      internal_ref: 7AEE42F0-4C8F92AE-E4267099-250DBBF9
+    time: "07:12"
+
+completion:
+  success:
+    - kind: all_objectives_completed
+      description: Bring the ICE-T to Fulda on time
+  failure:
+    - kind: time_reached
+      time: "07:20"
+      description: Delay window exceeded

@@ -1,13 +1,13 @@
-﻿# TSW Scenario Tool
+# TSW Scenario Tool
 
 `tswtool` is a CLI-first Rust workspace for authoring Train Sim World scenarios from a simple YAML file.
 
-The project direction is intentionally narrow:
+The current project focus is intentionally narrow:
 
-- build a scenario builder + validator first
-- treat `.pak` packaging as an optional final step
-- keep route profiles as the source of truth for what is valid
-- avoid centering the architecture around reverse engineering or packaging
+- define scenarios in YAML
+- validate them against curated route profiles
+- compile them into a predictable build folder
+- prepare structured artifacts for future packaging work
 
 ## Core Pipeline
 
@@ -19,89 +19,26 @@ Scenario YAML
   -> (optional) package staging / .pak packaging later
 ```
 
-The real MVP is not a packaging tool. The real MVP is a reliable workflow for:
+The real MVP is still the configuration pipeline, not `.pak` generation.
 
-1. defining a scenario in YAML
-2. validating it against curated route profiles
-3. compiling it into a predictable build folder
-
-## Current MVP Focus
-
-The core product scope is:
-
-1. Scenario schema
-2. Route profiles
-3. Validator
-4. Builder
-
-Minimal example:
-
-```yaml
-meta:
-  id: rro_test_001
-  title: Test Scenario
-  author: Dario
-
-scenario:
-  route: RRO
-  template: commuter_simple
-  start_time: "08:15"
-  weather: cloudy
-
-player_service:
-  consist: DB_BR422
-  start_location: Essen_Hbf_P5
-  destination: Bochum_Hbf_P3
-```
-
-Matching route profile example:
-
-```yaml
-id: RRO
-name: Ruhr-Sieg Nord
-
-supported_stock:
-  - DB_BR422
-
-spawn_points:
-  - Essen_Hbf_P5
-  - Bochum_Hbf_P3
-
-templates:
-  - commuter_simple
-```
-
-See:
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [Roadmap](docs/ROADMAP.md)
-- [Dovetail Questions](docs/DOVETAIL_QUESTIONS.md)
-
-## Repository Status
-
-The repository already contains code and data beyond the narrow MVP path. Today, the important distinction is:
-
-- core path: schema, profiles, validation, build output
-- optional support track: install scanning and package staging
-
-Existing capabilities in the workspace include:
+## Current Capabilities
 
 - scenario YAML parsing
-- profile loading
-- validation
-- build directory generation from templates
-- compiled JSON output
+- route profile loading
+- template loading
+- validation with structured `errors` and `warnings`
+- template-based build output
+- compiled intermediate JSON output
 - optional install scan support
+- optional route discovery artifacts derived from unpacked route data or FModel JSON exports
 - package staging preparation for future packaging work
-
-Those extra pieces should support the core workflow, not define it.
 
 ## Out Of Scope For Now
 
-These are explicitly deferred until the validator/builder workflow is solid:
+These remain intentionally deferred:
 
 - Unreal asset generation
-- `.uasset` parsing
+- `.uasset` writing
 - `.pak` packaging
 - mod installer
 - GUI
@@ -123,65 +60,262 @@ tsw-scenario-tool/
 |  |- DOVETAIL_QUESTIONS.md
 |  `- ROADMAP.md
 |- examples/
-|  `- rro_example.yaml
+|  `- frankfurt_fulda_example.yaml
 |- profiles/
 |  `- tsw5/
 |     `- routes/
-|        `- rro.yaml
-`- templates/
-   `- tsw5/
-      `- commuter_simple/
-         |- README.md
-         |- scenario_blueprint.yaml
-         `- template.yaml
+|- templates/
+|  `- tsw5/
+|     `- commuter_simple/
+`- artifacts/
+   `- discovery/
+```
+
+## Scenario Example
+
+```yaml
+meta:
+  id: ftf_br111_morning_001
+  title: 111 Hanau to Frankfurt Morning Peak
+  author: Dario
+
+scenario:
+  route: FrankfurtFulda
+  template: commuter_simple
+  start_time: "06:05"
+  weather: cloudy
+
+formations:
+  br111_push_pull:
+    entries:
+      - vehicle: FTF_DB_BR111
+      - vehicle: FTF_DB_NWagen
+        count: 3
+      - vehicle: FTF_DB_Bnrdzf_463
+        flipped: true
+
+player_service:
+  formation: br111_push_pull
+  start_location: Hanau Hbf Pl 6
+  destination: Frankfurt (Main) Hbf Pl 2
 ```
 
 ## Commands
 
-Validate a scenario:
+Validate the included example:
 
 ```bash
-cargo run -- validate examples/rro_example.yaml
+cargo run -- validate examples/frankfurt_fulda_example.yaml
 ```
 
-Build a scenario:
+Build the included example:
 
 ```bash
-cargo run -- build examples/rro_example.yaml
+cargo run -- build examples/frankfurt_fulda_example.yaml
 ```
 
 Build and clean the previous output first:
 
 ```bash
-cargo run -- build examples/rro_example.yaml --clean
+cargo run -- build examples/frankfurt_fulda_example.yaml --clean
+```
+
+Validate the catalog-backed Frankfurt Fulda example:
+
+```bash
+- `examples/frankfurt_fulda_example.yaml` for a realistic Frankfurt Fulda gameplay-style example
+- `examples/frankfurt_fulda_catalog_formation_example.yaml` for a discovery-backed example that uses `formation_ref`
+cargo run -- build examples/frankfurt_fulda_catalog_formation_example.yaml --clean
 ```
 
 Emit the validation report as JSON:
 
 ```bash
-cargo run -- validate examples/rro_example.yaml --json
+cargo run -- validate examples/frankfurt_fulda_example.yaml --json
 ```
 
-Optional install scan support:
+List locations for the only discovered route catalog in the project:
+
+```bash
+cargo run -- list-locations --usage player_spawn
+cargo run -- list-locations --usage service
+cargo run -- list-locations --usage objective
+```
+
+List locations for a specific route explicitly:
+
+```bash
+cargo run -- list-locations FrankfurtFulda --usage service
+```
+
+Inspect a single location query and see the ranked catalog candidates:
+
+```bash
+cargo run -- show-location "Frankfurt (Main) Hbf Pl 2" --usage service --route FrankfurtFulda
+cargo run -- show-location "Hanau Hbf" --usage player_spawn
+```
+
+List discovered stock ids for the only discovered route catalog in the project:
+
+```bash
+cargo run -- list-stock
+```
+
+Inspect a stock id and see the discovered plugin/source evidence:
+
+```bash
+cargo run -- show-stock BR411 --route FrankfurtFulda
+cargo run -- show-stock RVD_FTF_DB_BR411_TW_0 --route FrankfurtFulda --json
+```
+
+List discovered formation ids for a route:
+
+```bash
+cargo run -- list-formations FrankfurtFulda
+```
+
+Inspect a formation and see both its direct entries and the flattened vehicle list:
+
+```bash
+cargo run -- show-formation BR411 --route FrankfurtFulda
+cargo run -- show-formation FTF_ScA_PlayerICET --route FrankfurtFulda --json
+```
+
+When a name is ambiguous, the scenario YAML can pin the exact catalog entry explicitly:
+
+```yaml
+player_service:
+  start_location:
+    name: Hanau Hbf
+    spawn_tag: Hanau Hbf
+  destination:
+    name: Frankfurt (Main) Hbf Pl 2
+    internal_ref: 2FE008C5-4F8121B6-AD8F088A-695B7B33
+```
+
+Supported selector keys are:
+
+- `name`: human-readable label used for matching and template rendering
+- `catalog_id`: exact catalog entry id from `show-location --json`
+- `spawn_tag`: frontend/player spawn tag from route discovery
+- `internal_ref`: timetable/scenario internal reference such as a ribbon ref
+
+Discovery-backed service references work the same way for rolling stock and formations:
+
+```yaml
+player_service:
+  formation_ref:
+    id: FRM_FTF_DB_BR411
+    plugin: FTF_DB_BR411
+  start_location:
+    name: Hanau Hbf
+    spawn_tag: Hanau Hbf
+  destination:
+    name: Fulda Platform 1
+    internal_ref: 7AEE42F0-4C8F92AE-E4267099-250DBBF9
+```
+
+Service reference rules are:
+
+- `consist`: direct rolling-stock id, optionally with `plugin` / `source` selectors
+- `formation`: custom formation defined inside the same scenario YAML
+- `formation_ref`: discovered formation from `formation_catalog.json`, optionally pinned with `plugin` / `source`
+- exactly one of `consist`, `formation`, or `formation_ref` may be set for a service
+
+Scan an installed TSW directory and save `install_scan.json`:
 
 ```bash
 cargo run -- scan --game-dir "C:/Games/Train Sim World 6"
 ```
 
-Optional validation using a live scan:
+Discover route metadata from an unpacked route directory:
 
 ```bash
-cargo run -- validate examples/rro_example.yaml --game-dir "C:/Games/Train Sim World 6"
+cargo run -- discover-route FrankfurtFulda --route-dir external_dlc/FrankfurtFulda/TS2Prototype/Plugins/DLC/FrankfurtFulda
 ```
 
-Optional validation using a saved install scan cache:
+Discover route metadata from FModel JSON exports:
 
 ```bash
-cargo run -- validate examples/rro_example.yaml --install-scan install_scan.json
+cargo run -- discover-route BremenOldenburg --exports-dir "C:/Users/dadob/Desktop/Output/Exports/TS2Prototype/Plugins/DLC/BremenOldenburg_Route_Gameplay"
 ```
 
-## Design Notes
+Emit route discovery as JSON to stdout while also saving the artifact:
 
-- Profiles remain the source of truth for supported stock, spawn points, templates, and game compatibility.
-- Install scanning answers "what seems to be installed on this machine?" but does not decide what the tool supports.
-- Packaging is a downstream concern and should not become the primary architecture driver.
+```bash
+cargo run -- discover-route FrankfurtFulda --route-dir external_dlc/FrankfurtFulda/TS2Prototype/Plugins/DLC/FrankfurtFulda --json
+```
+
+## Route Discovery Artifacts
+
+`discover-route` writes a route discovery artifact by default to:
+
+```text
+artifacts/discovery/<route-id>.route_discovery.json
+```
+
+For example:
+
+```text
+artifacts/discovery/frankfurtfulda.route_discovery.json
+artifacts/discovery/frankfurtfulda.location_catalog.json
+artifacts/discovery/frankfurtfulda.stock_catalog.json
+artifacts/discovery/frankfurtfulda.formation_catalog.json
+```
+
+The matching `location_catalog.json` groups candidate operational locations under frontend stations when possible, leaves the remaining items under `ungrouped_locations`, and annotates each grouped location with `source_kind`, `confidence`, and `allowed_uses` so the app can distinguish between player spawn points, timetable/service locations, scenario references, and low-confidence localization-only candidates.
+
+The matching `stock_catalog.json` captures discovered rolling stock ids together with their source plugin/path evidence, so the CLI can list and inspect the real stock seen in exported DLC JSON without relying only on curated route profiles.
+
+The matching `formation_catalog.json` captures discovered `TrainFormation` assets together with their direct entries, plugin/source evidence, and enough data to flatten nested formations into their final vehicle list for inspection.
+
+A route discovery artifact can contain:
+
+- route overview metadata (display name, endpoints, level asset, route map widget)
+- frontend spawn points from `RouteDefinition`
+- route definition ids
+- candidate operational locations
+- stock ids discovered from exports
+- stock catalog entries with plugin/source evidence
+- formation catalog entries with nested composition data
+- source file evidence
+
+`validate` and `build` auto-load the matching discovery artifact for the scenario route if it exists. When a matching `location_catalog.json` is present, the compiler also resolves user-facing location labels into real route references such as frontend `spawn_tag` values and operational `internal_ref` / `RibbonReference` identifiers. `validate` emits `AMBIGUOUS_LOCATION` warnings if the same label matches multiple catalog entries, and explicit selectors such as `spawn_tag`, `catalog_id`, or `internal_ref` fail with `INVALID_LOCATION_SELECTOR` if they do not resolve.
+
+The artifact extends the curated route profile with additional:
+
+- spawn point candidates
+- frontend spawn points and station tags
+- supported stock ids
+- install hints from discovered route titles
+
+Curated profiles remain the source of truth. Route discovery is an enrichment layer, not a replacement.
+
+## Install Scan Notes
+
+Install scanning answers "what seems to be installed on this machine?" but does not decide what the tool supports.
+
+Route discovery answers "what metadata can we derive from unpacked content or exports?" but does not replace curated validation rules.
+
+The intended layering is:
+
+1. curated route profile
+2. optional route discovery artifact
+3. optional install scan
+
+## Examples
+
+The repository includes:
+
+- `examples/frankfurt_fulda_example.yaml` for a realistic Frankfurt Fulda gameplay-style example
+- `examples/frankfurt_fulda_catalog_formation_example.yaml` for a discovery-backed example that uses `formation_ref`
+
+## Additional Docs
+
+See:
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Dovetail Questions](docs/DOVETAIL_QUESTIONS.md)
+
+

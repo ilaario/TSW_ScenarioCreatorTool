@@ -12,3 +12,5 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 tsw-scenario-core.workspace = true
 tsw-scenario-schema.workspace = true
+tsw-scenario-scanner.workspace = true
+
