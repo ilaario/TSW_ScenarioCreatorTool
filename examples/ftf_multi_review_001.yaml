@@ -1,0 +1,34 @@
+meta:
+  id: ftf_multi_review_001
+  title: Updated Review
+  author: Updated Author
+scenario:
+  route: FrankfurtFulda
+  template: commuter_simple
+  start_time: 08:00
+  weather: clear
+player_service:
+  formation_ref:
+    id: FRM_FTF_DB_BR411
+    plugin: FTF_DB_BR411
+    source: TS2Prototype/Plugins/DLC/FTF_DB_BR411/Content/Data/RVD/FRM_FTF_DB_BR411.json
+  start_location:
+    name: Hanau Hbf
+    catalog_id: Hanau Hbf
+    spawn_tag: Hanau Hbf
+  destination:
+    name: Fulda Platform 1
+    catalog_id: fulda_platform_1
+    internal_ref: 7AEE42F0-4C8F92AE-E4267099-250DBBF9
+objectives:
+- id: reach_destination
+  description: Reach Fulda Platform 1
+  kind: reach_destination
+  location:
+    name: Fulda Platform 1
+    catalog_id: fulda_platform_1
+    internal_ref: 7AEE42F0-4C8F92AE-E4267099-250DBBF9
+completion:
+  success:
+  - kind: all_objectives_completed
+    description: Complete the generated starter scenario

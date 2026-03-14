@@ -1,0 +1,49 @@
+meta:
+  id: frankfurtfulda_scenario_001
+  title: Frankfurt Fulda service
+  author: Dario
+scenario:
+  route: FrankfurtFulda
+  template: commuter_simple
+  start_time: 08:00
+  weather: clear
+player_service:
+  formation_ref:
+    id: FRM_FTF_DB_BR411
+    plugin: FTF_DB_BR411
+    source: TS2Prototype/Plugins/DLC/FTF_DB_BR411/Content/Data/RVD/FRM_FTF_DB_BR411.json
+  start_location:
+    name: Bad Soden - Salmünster
+    catalog_id: Bad Soden - Salmunster
+    spawn_tag: Bad Soden - Salmunster
+  destination:
+    name: Bad Soden - Salmünster
+    catalog_id: Bad Soden - Salmunster
+    spawn_tag: Bad Soden - Salmunster
+ai_services:
+- id: ai_service_01
+  formation_ref:
+    id: FRM_FTF_DB_BR423
+    plugin: FTF_DB_BR423
+    source: TS2Prototype/Plugins/DLC/FTF_DB_BR423/Content/Data/Formations/FRM_FTF_DB_BR423.json
+  start_location:
+    name: Bad Soden - Salmünster
+    catalog_id: Bad Soden - Salmunster
+    spawn_tag: Bad Soden - Salmunster
+  destination:
+    name: Bad Soden - Salmünster
+    catalog_id: Bad Soden - Salmunster
+    spawn_tag: Bad Soden - Salmunster
+  departure_time: 08:00
+objectives:
+- id: reach_destination
+  description: Reach Bad Soden - Salmünster
+  kind: reach_destination
+  location:
+    name: Bad Soden - Salmünster
+    catalog_id: Bad Soden - Salmunster
+    spawn_tag: Bad Soden - Salmunster
+completion:
+  success:
+  - kind: all_objectives_completed
+    description: Complete the generated starter scenario

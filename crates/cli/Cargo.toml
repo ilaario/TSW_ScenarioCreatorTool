@@ -10,6 +10,7 @@ anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tsw-scenario-compiler.workspace = true
 tsw-scenario-core.workspace = true
 tsw-scenario-scanner.workspace = true

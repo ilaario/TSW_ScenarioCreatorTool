@@ -181,6 +181,26 @@ cargo run -- show-formation BR411 --route FrankfurtFulda
 cargo run -- show-formation FTF_ScA_PlayerICET --route FrankfurtFulda --json
 ```
 
+Generate an explicit YAML selector for authoring `consist` or `formation_ref`:
+
+```bash
+cargo run -- show-service-ref BR411 --kind stock --route FrankfurtFulda
+cargo run -- show-service-ref FTF_ScA_PlayerICET --kind formation --route FrankfurtFulda
+```
+
+Generate a starter scenario YAML from the current route profile and discovery catalogs:
+
+```bash
+cargo run -- init-scenario --route FrankfurtFulda --scenario-id ftf_new_001 --author Dario
+```
+
+If you omit key fields, `init-scenario` switches to a guided CLI flow and prompts for start location, destination, service reference, and basic metadata.
+The guided flow now also lets you choose between discovered `formation_ref` and `consist` references, and can optionally add a first AI service.
+Before writing the file, the guided flow prints a summary and asks for final confirmation.
+If you answer `no`, the wizard now lets you edit a section and then returns to the summary instead of aborting immediately.
+You can keep editing multiple sections in that loop before choosing `Back to summary` and confirming the write.
+The summary now includes technical selectors such as `spawn_tag`, `internal_ref`, `plugin`, and `source` when they are available.
+
 When a name is ambiguous, the scenario YAML can pin the exact catalog entry explicitly:
 
 ```yaml

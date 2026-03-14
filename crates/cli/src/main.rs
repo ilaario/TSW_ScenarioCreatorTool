@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -25,7 +26,12 @@ use tsw_scenario_scanner::{
     LocationCatalog, LocationLookupUsage, LocationMatch, LocationMatchConstraints,
     RouteDiscovery, StockCatalog, StockCatalogEntry, StockMatchConstraints,
 };
-use tsw_scenario_schema::{RouteProfile, ScenarioAssetReference, ScenarioLocation, ScenarioProject};
+use tsw_scenario_schema::{
+    AiService, CompletionRules, Condition, ConditionKind, Meta, Objective, ObjectiveKind,
+    PlayerService,
+    RouteProfile, Scenario, ScenarioAssetReference, ScenarioLocation, ScenarioLocationReference,
+    ScenarioProject,
+};
 use tsw_scenario_validator::{validate_project, ValidationIssue, ValidationReport};
 
 #[derive(Debug, Parser)]
@@ -124,6 +130,45 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    ShowServiceRef {
+        query: String,
+        #[arg(long = "route")]
+        route_id: Option<String>,
+        #[arg(long, value_enum)]
+        kind: ServiceReferenceKind,
+        #[arg(long)]
+        json: bool,
+    },
+    InitScenario {
+        #[arg(long = "route")]
+        route_id: Option<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        scenario_id: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long, default_value = "08:00")]
+        start_time: String,
+        #[arg(long)]
+        weather: Option<String>,
+        #[arg(long)]
+        start_location: Option<String>,
+        #[arg(long)]
+        destination: Option<String>,
+        #[arg(long)]
+        consist: Option<String>,
+        #[arg(long)]
+        formation_ref: Option<String>,
+        #[arg(long, value_enum, default_value = "formation")]
+        prefer_service_ref: ServiceReferenceKind,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ValueEnum)]
@@ -135,6 +180,24 @@ enum LocationUsage {
     Service,
     #[value(name = "objective")]
     Objective,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum ServiceReferenceKind {
+    #[value(name = "stock")]
+    Stock,
+    #[value(name = "formation")]
+    Formation,
+}
+
+impl ServiceReferenceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stock => "stock",
+            Self::Formation => "formation",
+        }
+    }
 }
 
 impl LocationUsage {
@@ -245,6 +308,18 @@ struct ShowFormationOutput {
     matches: Vec<FormationCatalogEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     flattened: Vec<FlattenedFormationVehicle>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ShowServiceRefOutput {
+    route_id: String,
+    query: String,
+    kind: ServiceReferenceKind,
+    match_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    yaml_snippet: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -374,6 +449,54 @@ fn try_main() -> Result<()> {
             route_id.as_deref(),
             &query,
             json,
+        ),
+        Commands::ShowServiceRef {
+            query,
+            route_id,
+            kind,
+            json,
+        } => run_show_service_ref(
+            &project_root,
+            &cli.game_version,
+            &cli.profiles_root,
+            route_id.as_deref(),
+            &query,
+            kind,
+            json,
+        ),
+        Commands::InitScenario {
+            route_id,
+            output,
+            scenario_id,
+            title,
+            author,
+            template,
+            start_time,
+            weather,
+            start_location,
+            destination,
+            consist,
+            formation_ref,
+            prefer_service_ref,
+            force,
+        } => run_init_scenario(
+            &project_root,
+            &cli.game_version,
+            &cli.profiles_root,
+            route_id.as_deref(),
+            output.as_deref(),
+            scenario_id.as_deref(),
+            title.as_deref(),
+            author.as_deref(),
+            template.as_deref(),
+            &start_time,
+            weather.as_deref(),
+            start_location.as_deref(),
+            destination.as_deref(),
+            consist.as_deref(),
+            formation_ref.as_deref(),
+            prefer_service_ref,
+            force,
         ),
     }
 }
@@ -813,6 +936,418 @@ fn run_show_formation(
                 println!("  - {}", format_flattened_formation_vehicle(vehicle));
             }
         }
+    }
+
+    Ok(())
+}
+
+fn run_show_service_ref(
+    project_root: &Path,
+    game_version: &str,
+    profiles_root: &Path,
+    route_id: Option<&str>,
+    query: &str,
+    kind: ServiceReferenceKind,
+    json: bool,
+) -> Result<()> {
+    let route_id = resolve_route_id_for_list_locations(
+        project_root,
+        game_version,
+        profiles_root,
+        route_id,
+    )?;
+
+    match kind {
+        ServiceReferenceKind::Stock => {
+            let stock_catalog = resolve_stock_catalog(project_root, &route_id)?.with_context(|| {
+                format!(
+                    "stock catalog '{}' not found; run discover-route first",
+                    default_stock_catalog_path(project_root, &route_id).display()
+                )
+            })?;
+
+            let matches = resolve_stock_matches(&stock_catalog, query);
+            let selected = matches.first();
+            let yaml_snippet = selected.map(stock_selector_yaml_snippet);
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ShowServiceRefOutput {
+                        route_id,
+                        query: query.to_string(),
+                        kind,
+                        match_count: matches.len(),
+                        selected_id: selected.map(|entry| entry.id.clone()),
+                        yaml_snippet,
+                    })
+                    .context("failed to serialize service reference matches as JSON")?
+                );
+            } else {
+                println!(
+                    "Service reference matches for route '{}': {}",
+                    route_id,
+                    matches.len()
+                );
+                println!("Query: {}", query);
+                println!("Kind: {}", kind.as_str());
+
+                if matches.is_empty() {
+                    println!("No matching stock entries.");
+                    return Ok(());
+                }
+
+                println!("Selected candidate:");
+                println!("  - {}", format_stock_match_details(&matches[0]));
+
+                if matches.len() > 1 {
+                    println!("All candidates:");
+                    for (index, stock) in matches.iter().enumerate() {
+                        let selected_marker = if index == 0 { " (selected)" } else { "" };
+                        println!("  - {}{}", format_stock_match_details(stock), selected_marker);
+                    }
+                }
+
+                if let Some(yaml_snippet) = yaml_snippet {
+                    println!("YAML snippet:");
+                    print!("{yaml_snippet}");
+                }
+            }
+        }
+        ServiceReferenceKind::Formation => {
+            let formation_catalog =
+                resolve_formation_catalog(project_root, &route_id)?.with_context(|| {
+                    format!(
+                        "formation catalog '{}' not found; run discover-route first",
+                        default_formation_catalog_path(project_root, &route_id).display()
+                    )
+                })?;
+
+            let matches = resolve_formation_matches(&formation_catalog, query);
+            let selected = matches.first();
+            let yaml_snippet = selected.map(formation_selector_yaml_snippet);
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ShowServiceRefOutput {
+                        route_id,
+                        query: query.to_string(),
+                        kind,
+                        match_count: matches.len(),
+                        selected_id: selected.map(|entry| entry.id.clone()),
+                        yaml_snippet,
+                    })
+                    .context("failed to serialize service reference matches as JSON")?
+                );
+            } else {
+                println!(
+                    "Service reference matches for route '{}': {}",
+                    route_id,
+                    matches.len()
+                );
+                println!("Query: {}", query);
+                println!("Kind: {}", kind.as_str());
+
+                if matches.is_empty() {
+                    println!("No matching formation entries.");
+                    return Ok(());
+                }
+
+                println!("Selected candidate:");
+                println!("  - {}", format_formation_match_details(&matches[0]));
+
+                if matches.len() > 1 {
+                    println!("All candidates:");
+                    for (index, formation) in matches.iter().enumerate() {
+                        let selected_marker = if index == 0 { " (selected)" } else { "" };
+                        println!(
+                            "  - {}{}",
+                            format_formation_match_details(formation),
+                            selected_marker
+                        );
+                    }
+                }
+
+                if let Some(yaml_snippet) = yaml_snippet {
+                    println!("YAML snippet:");
+                    print!("{yaml_snippet}");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_init_scenario(
+    project_root: &Path,
+    game_version: &str,
+    profiles_root: &Path,
+    route_id: Option<&str>,
+    output: Option<&Path>,
+    scenario_id: Option<&str>,
+    title: Option<&str>,
+    author: Option<&str>,
+    template: Option<&str>,
+    start_time: &str,
+    weather: Option<&str>,
+    start_location: Option<&str>,
+    destination: Option<&str>,
+    consist: Option<&str>,
+    formation_ref: Option<&str>,
+    prefer_service_ref: ServiceReferenceKind,
+    force: bool,
+) -> Result<()> {
+    let guided_mode = scenario_id.is_none()
+        || title.is_none()
+        || author.is_none()
+        || template.is_none()
+        || weather.is_none()
+        || start_location.is_none()
+        || destination.is_none()
+        || (consist.is_none() && formation_ref.is_none());
+
+    if consist.is_some() && formation_ref.is_some() {
+        bail!("only one of --consist or --formation-ref may be set");
+    }
+
+    let route_id = resolve_route_id_for_list_locations(
+        project_root,
+        game_version,
+        profiles_root,
+        route_id,
+    )?;
+    let resolved_profiles_root = resolve_profiles_root(project_root, profiles_root, game_version);
+    let mut route_profile =
+        load_route_profile_from_root(&resolved_profiles_root, &route_id).with_context(|| {
+            format!(
+                "failed to load route profile '{}' from '{}'",
+                route_id,
+                resolved_profiles_root.display()
+            )
+        })?;
+
+    let route_discovery = resolve_route_discovery(project_root, &route_id)?;
+    if let Some(discovery) = &route_discovery {
+        merge_route_discovery_into_route_profile(&mut route_profile, discovery);
+    }
+    let location_catalog = resolve_location_catalog(project_root, &route_id)?;
+    if let Some(catalog) = &location_catalog {
+        merge_location_catalog_into_route_profile(&mut route_profile, catalog);
+    }
+    let stock_catalog = resolve_stock_catalog(project_root, &route_id)?;
+    if let Some(catalog) = &stock_catalog {
+        merge_stock_catalog_into_route_profile(&mut route_profile, catalog);
+    }
+    let formation_catalog = resolve_formation_catalog(project_root, &route_id)?;
+
+    let default_scenario_id_value = default_scenario_id(&route_id);
+    let scenario_id = match scenario_id {
+        Some(value) => value.to_string(),
+        None => prompt_text("Scenario id", Some(default_scenario_id_value.as_str()))?,
+    };
+    let output_path = output
+        .map(|path| resolve_relative_to(project_root, path))
+        .unwrap_or_else(|| project_root.join("examples").join(format!("{scenario_id}.yaml")));
+    if output_path.exists() && !force {
+        bail!(
+            "output file '{}' already exists; pass --force to overwrite",
+            output_path.display()
+        );
+    }
+
+    let template_id = select_template_id(&route_profile, template)?;
+    let mut weather = select_weather(&route_profile, weather)?;
+    let default_title_value = format!("{} service", route_profile.name);
+    let mut title = match title {
+        Some(value) => value.to_string(),
+        None => prompt_text("Scenario title", Some(default_title_value.as_str()))?,
+    };
+    let mut author = match author {
+        Some(value) => value.to_string(),
+        None => prompt_text("Author", Some("Unknown"))?,
+    };
+
+    let mut start_location = select_init_location(
+        location_catalog.as_ref(),
+        &route_profile,
+        start_location,
+        LocationUsage::PlayerSpawn,
+    )?;
+    let mut destination = select_init_destination(
+        location_catalog.as_ref(),
+        &route_profile,
+        &start_location,
+        destination,
+    )?;
+
+    let (mut consist_ref, mut formation_ref_value) = select_init_service_reference(
+        stock_catalog.as_ref(),
+        formation_catalog.as_ref(),
+        consist,
+        formation_ref,
+        prefer_service_ref,
+    )?;
+
+    let mut ai_services = configure_init_ai_services(
+        location_catalog.as_ref(),
+        &route_profile,
+        stock_catalog.as_ref(),
+        formation_catalog.as_ref(),
+        prefer_service_ref,
+        start_time,
+        None,
+    )?;
+
+    let project = loop {
+        let project = build_init_scenario_project(
+            &scenario_id,
+            &route_id,
+            &template_id,
+            start_time,
+            &weather,
+            &title,
+            &author,
+            start_location.clone(),
+            destination.clone(),
+            consist_ref.clone(),
+            formation_ref_value.clone(),
+            ai_services.clone(),
+        );
+
+        if !guided_mode {
+            break project;
+        }
+
+        print_init_scenario_summary(&project, &output_path);
+        if prompt_yes_no("Write scenario file?", true)? {
+            break project;
+        }
+
+        loop {
+            let section = prompt_choice(
+                "What do you want to edit?",
+                &[
+                    "Title".to_string(),
+                    "Author".to_string(),
+                    "Weather".to_string(),
+                    "Player start".to_string(),
+                    "Destination".to_string(),
+                    "Player service reference".to_string(),
+                    "AI service".to_string(),
+                    "Back to summary".to_string(),
+                    "Cancel initialization".to_string(),
+                ],
+                0,
+            )?;
+
+            match section.as_str() {
+                "Title" => {
+                    title = prompt_text("Scenario title", Some(title.as_str()))?;
+                }
+                "Author" => {
+                    author = prompt_text("Author", Some(author.as_str()))?;
+                }
+                "Weather" => {
+                    weather = prompt_weather_selection(&route_profile, weather.as_str())?;
+                }
+                "Player start" => {
+                    start_location = select_init_location(
+                        location_catalog.as_ref(),
+                        &route_profile,
+                        None,
+                        LocationUsage::PlayerSpawn,
+                    )?;
+                    if destination
+                        .display_label()
+                        .eq_ignore_ascii_case(&start_location.display_label())
+                    {
+                        destination = select_init_destination(
+                            location_catalog.as_ref(),
+                            &route_profile,
+                            &start_location,
+                            None,
+                        )?;
+                    }
+                }
+                "Destination" => {
+                    destination = select_init_destination(
+                        location_catalog.as_ref(),
+                        &route_profile,
+                        &start_location,
+                        None,
+                    )?;
+                }
+                "Player service reference" => {
+                    let (next_consist_ref, next_formation_ref_value) = select_init_service_reference(
+                        stock_catalog.as_ref(),
+                        formation_catalog.as_ref(),
+                        None,
+                        None,
+                        prefer_service_ref,
+                    )?;
+                    consist_ref = next_consist_ref;
+                    formation_ref_value = next_formation_ref_value;
+                }
+                "AI service" => {
+                    ai_services = configure_init_ai_services(
+                        location_catalog.as_ref(),
+                        &route_profile,
+                        stock_catalog.as_ref(),
+                        formation_catalog.as_ref(),
+                        prefer_service_ref,
+                        start_time,
+                        ai_services.first(),
+                    )?;
+                }
+                "Back to summary" => break,
+                "Cancel initialization" => {
+                    println!("Scenario initialization cancelled.");
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    };
+
+    let yaml = serde_yaml::to_string(&project).context("failed to serialize scenario YAML")?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create output directory '{}'",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&output_path, yaml).with_context(|| {
+        format!(
+            "failed to write initialized scenario '{}'",
+            output_path.display()
+        )
+    })?;
+
+    println!("Initialized scenario: {}", output_path.display());
+    println!("Route: {}", route_id);
+    println!("Template: {}", project.scenario.template);
+    println!(
+        "Player start: {}",
+        project.player_service.start_location.display_label()
+    );
+    println!(
+        "Destination: {}",
+        project.player_service.destination.display_label()
+    );
+    match (
+        project.player_service.consist.as_ref(),
+        project.player_service.formation_ref.as_ref(),
+    ) {
+        (Some(consist), None) => println!("Service reference: consist {}", consist.id().unwrap_or("")),
+        (None, Some(formation_ref)) => {
+            println!("Service reference: formation_ref {}", formation_ref.id().unwrap_or(""))
+        }
+        _ => {}
     }
 
     Ok(())
@@ -1637,6 +2172,826 @@ fn format_flattened_formation_vehicle(vehicle: &FlattenedFormationVehicle) -> St
         segments.push(format!("cargo_units={cargo_units}"));
     }
     segments.join(", ")
+}
+
+fn format_location_choice(location: &LocationMatch) -> String {
+    let mut segments = vec![location.display_name.clone()];
+    segments.push(format!("catalog_id={}", location.catalog_id));
+    if let Some(spawn_tag) = &location.spawn_tag {
+        segments.push(format!("spawn_tag={spawn_tag}"));
+    }
+    if let Some(internal_ref) = &location.internal_ref {
+        segments.push(format!("internal_ref={internal_ref}"));
+    }
+    segments.push(format!("kind={:?}", location.match_kind));
+    segments.join(", ")
+}
+
+fn format_stock_choice(stock: &StockCatalogEntry) -> String {
+    let mut segments = vec![stock.id.clone()];
+    if let Some(plugin) = &stock.plugin {
+        segments.push(format!("plugin={plugin}"));
+    }
+    segments.push(format!("source={}", stock.source));
+    segments.join(", ")
+}
+
+fn format_formation_choice(formation: &FormationCatalogEntry) -> String {
+    let mut segments = vec![formation.id.clone()];
+    if let Some(plugin) = &formation.plugin {
+        segments.push(format!("plugin={plugin}"));
+    }
+    segments.push(format!("entries={}", formation.entries.len()));
+    segments.push(format!("source={}", formation.source));
+    segments.join(", ")
+}
+
+fn location_suggestions(
+    location_catalog: Option<&LocationCatalog>,
+    route_profile: &RouteProfile,
+    usage: LocationUsage,
+) -> Vec<String> {
+    let mut suggestions = if let Some(catalog) = location_catalog {
+        list_locations_from_catalog(catalog, usage)
+    } else {
+        list_locations_from_route_profile(route_profile, usage)
+    };
+    suggestions.truncate(12);
+    suggestions
+}
+
+fn stock_selector_yaml_snippet(stock: &StockCatalogEntry) -> String {
+    let mut snippet = String::from("consist:\n");
+    snippet.push_str(&format!("  id: {}\n", stock.id));
+    if let Some(plugin) = &stock.plugin {
+        snippet.push_str(&format!("  plugin: {}\n", plugin));
+    }
+    snippet.push_str(&format!("  source: {}\n", stock.source));
+    snippet
+}
+
+fn formation_selector_yaml_snippet(formation: &FormationCatalogEntry) -> String {
+    let mut snippet = String::from("formation_ref:\n");
+    snippet.push_str(&format!("  id: {}\n", formation.id));
+    if let Some(plugin) = &formation.plugin {
+        snippet.push_str(&format!("  plugin: {}\n", plugin));
+    }
+    snippet.push_str(&format!("  source: {}\n", formation.source));
+    snippet
+}
+
+fn default_scenario_id(route_id: &str) -> String {
+    format!("{}_scenario_001", discovery_slug(route_id))
+}
+
+fn prompt_text(label: &str, default: Option<&str>) -> Result<String> {
+    let mut stdout = io::stdout();
+    if let Some(default) = default {
+        write!(stdout, "{} [{}]: ", label, default)?;
+    } else {
+        write!(stdout, "{}: ", label)?;
+    }
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let value = input.trim();
+    if value.is_empty() {
+        if let Some(default) = default {
+            return Ok(default.to_string());
+        }
+    }
+    Ok(value.to_string())
+}
+
+fn prompt_choice(label: &str, options: &[String], default_index: usize) -> Result<String> {
+    let mut stdout = io::stdout();
+    println!("{label}");
+    for (index, option) in options.iter().enumerate() {
+        let marker = if index == default_index { " (default)" } else { "" };
+        println!("  {}. {}{}", index + 1, option, marker);
+    }
+    write!(stdout, "Choose 1-{} [{}]: ", options.len(), default_index + 1)?;
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(options[default_index].clone());
+    }
+
+    let selected_index: usize = trimmed
+        .parse()
+        .with_context(|| format!("invalid selection '{}'", trimmed))?;
+    if selected_index == 0 || selected_index > options.len() {
+        bail!("selection out of range");
+    }
+
+    Ok(options[selected_index - 1].clone())
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> Result<bool> {
+    let mut stdout = io::stdout();
+    let default_label = if default { "Y/n" } else { "y/N" };
+    write!(stdout, "{} [{}]: ", label, default_label)?;
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Ok(default);
+    }
+    match trimmed.as_str() {
+        "y" | "yes" | "s" | "si" => Ok(true),
+        "n" | "no" => Ok(false),
+        _ => bail!("invalid yes/no answer '{}'", trimmed),
+    }
+}
+
+fn select_template_id(route_profile: &RouteProfile, template: Option<&str>) -> Result<String> {
+    if let Some(template) = template {
+        return Ok(template.to_string());
+    }
+
+    let options = if route_profile.templates.is_empty() {
+        vec!["commuter_simple".to_string()]
+    } else {
+        route_profile
+            .templates
+            .iter()
+            .map(|entry| entry.id().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    if options.len() == 1 {
+        Ok(options[0].clone())
+    } else {
+        prompt_choice("Template", &options, 0)
+    }
+}
+
+fn select_weather(route_profile: &RouteProfile, weather: Option<&str>) -> Result<String> {
+    if let Some(weather) = weather {
+        return Ok(weather.to_string());
+    }
+
+    let options = if route_profile.supported_weather.is_empty() {
+        vec!["cloudy".to_string()]
+    } else {
+        route_profile.supported_weather.clone()
+    };
+
+    if options.len() == 1 {
+        Ok(options[0].clone())
+    } else {
+        prompt_choice("Weather", &options, 0)
+    }
+}
+
+fn prompt_weather_selection(route_profile: &RouteProfile, current: &str) -> Result<String> {
+    let options = if route_profile.supported_weather.is_empty() {
+        vec!["cloudy".to_string()]
+    } else {
+        route_profile.supported_weather.clone()
+    };
+    let default_index = options
+        .iter()
+        .position(|candidate| candidate == current)
+        .unwrap_or(0);
+    if options.len() == 1 {
+        Ok(options[0].clone())
+    } else {
+        prompt_choice("Weather", &options, default_index)
+    }
+}
+
+fn select_init_location(
+    location_catalog: Option<&LocationCatalog>,
+    route_profile: &RouteProfile,
+    query: Option<&str>,
+    usage: LocationUsage,
+) -> Result<ScenarioLocation> {
+    if query.is_none() {
+        let suggestions = location_suggestions(location_catalog, route_profile, usage);
+        let default = suggestions.first().map(String::as_str);
+        let prompt = match usage {
+            LocationUsage::PlayerSpawn => "Player start location",
+            LocationUsage::Service => "Service location",
+            LocationUsage::Objective => "Objective location",
+        };
+        let chosen_query = prompt_text(prompt, default)?;
+        if let Ok(location) =
+            resolve_init_location(location_catalog, route_profile, Some(chosen_query.as_str()), usage)
+        {
+            return Ok(location);
+        }
+        return resolve_init_location(location_catalog, route_profile, None, usage);
+    }
+
+    let query = query.unwrap_or_default();
+    if let Some(catalog) = location_catalog {
+        let matches = resolve_location_matches(catalog, query, location_lookup_usage(usage));
+        if matches.len() > 1 {
+            let options = matches
+                .iter()
+                .take(8)
+                .map(format_location_choice)
+                .collect::<Vec<_>>();
+            let chosen = prompt_choice("Multiple location matches found", &options, 0)?;
+            if let Some(index) = options.iter().position(|option| option == &chosen) {
+                return Ok(location_match_to_scenario_location(&matches[index]));
+            }
+        }
+    }
+
+    resolve_init_location(location_catalog, route_profile, Some(query), usage)
+}
+
+fn select_init_destination(
+    location_catalog: Option<&LocationCatalog>,
+    route_profile: &RouteProfile,
+    start_location: &ScenarioLocation,
+    query: Option<&str>,
+) -> Result<ScenarioLocation> {
+    if query.is_none() {
+        let suggestions = location_suggestions(location_catalog, route_profile, LocationUsage::Service)
+            .into_iter()
+            .filter(|value| !value.eq_ignore_ascii_case(&start_location.display_label()))
+            .collect::<Vec<_>>();
+        let default = suggestions.first().map(String::as_str);
+        let chosen_query = prompt_text("Destination", default)?;
+        if let Ok(location) = resolve_init_destination(
+            location_catalog,
+            route_profile,
+            start_location,
+            Some(chosen_query.as_str()),
+        ) {
+            return Ok(location);
+        }
+        return resolve_init_destination(location_catalog, route_profile, start_location, None);
+    }
+
+    let query = query.unwrap_or_default();
+    if let Some(catalog) = location_catalog {
+        let matches = resolve_location_matches(
+            catalog,
+            query,
+            location_lookup_usage(LocationUsage::Service),
+        );
+        if matches.len() > 1 {
+            let options = matches
+                .iter()
+                .take(8)
+                .map(format_location_choice)
+                .collect::<Vec<_>>();
+            let chosen = prompt_choice("Multiple destination matches found", &options, 0)?;
+            if let Some(index) = options.iter().position(|option| option == &chosen) {
+                return Ok(location_match_to_scenario_location(&matches[index]));
+            }
+        }
+    }
+
+    resolve_init_destination(location_catalog, route_profile, start_location, Some(query))
+}
+
+fn select_init_service_reference(
+    stock_catalog: Option<&StockCatalog>,
+    formation_catalog: Option<&FormationCatalog>,
+    consist_query: Option<&str>,
+    formation_query: Option<&str>,
+    prefer_kind: ServiceReferenceKind,
+) -> Result<(Option<ScenarioAssetReference>, Option<ScenarioAssetReference>)> {
+    if consist_query.is_none() && formation_query.is_none() {
+        let service_kind = select_service_reference_kind(
+            stock_catalog,
+            formation_catalog,
+            prefer_kind,
+        )?;
+        return match service_kind {
+            ServiceReferenceKind::Formation => {
+                let catalog = formation_catalog.ok_or_else(|| {
+                    anyhow::anyhow!("formation catalog not found; run discover-route first")
+                })?;
+                let options = catalog
+                    .formations
+                    .iter()
+                    .take(8)
+                    .map(format_formation_choice)
+                    .collect::<Vec<_>>();
+                if options.is_empty() {
+                    bail!("no formation catalog entries available to initialize the player service");
+                }
+                let chosen = prompt_choice("Choose a formation", &options, 0)?;
+                let index = options
+                    .iter()
+                    .position(|option| option == &chosen)
+                    .unwrap_or(0);
+                Ok((None, Some(formation_entry_to_reference(&catalog.formations[index]))))
+            }
+            ServiceReferenceKind::Stock => {
+                let catalog = stock_catalog.ok_or_else(|| {
+                    anyhow::anyhow!("stock catalog not found; run discover-route first")
+                })?;
+                let options = catalog
+                    .stock
+                    .iter()
+                    .take(8)
+                    .map(format_stock_choice)
+                    .collect::<Vec<_>>();
+                if options.is_empty() {
+                    bail!("no stock catalog entries available to initialize the player service");
+                }
+                let chosen = prompt_choice("Choose stock", &options, 0)?;
+                let index = options
+                    .iter()
+                    .position(|option| option == &chosen)
+                    .unwrap_or(0);
+                Ok((Some(stock_entry_to_reference(&catalog.stock[index])), None))
+            }
+        };
+    }
+
+    if let Some(query) = consist_query {
+        if let Some(catalog) = stock_catalog {
+            let matches = resolve_stock_matches(catalog, query);
+            if matches.len() > 1 {
+                let options = matches
+                    .iter()
+                    .take(8)
+                    .map(format_stock_choice)
+                    .collect::<Vec<_>>();
+                let chosen = prompt_choice("Multiple stock matches found", &options, 0)?;
+                if let Some(index) = options.iter().position(|option| option == &chosen) {
+                    return Ok((Some(stock_entry_to_reference(&matches[index])), None));
+                }
+            }
+        }
+    }
+
+    if let Some(query) = formation_query {
+        if let Some(catalog) = formation_catalog {
+            let matches = resolve_formation_matches(catalog, query);
+            if matches.len() > 1 {
+                let options = matches
+                    .iter()
+                    .take(8)
+                    .map(format_formation_choice)
+                    .collect::<Vec<_>>();
+                let chosen = prompt_choice("Multiple formation matches found", &options, 0)?;
+                if let Some(index) = options.iter().position(|option| option == &chosen) {
+                    return Ok((None, Some(formation_entry_to_reference(&matches[index]))));
+                }
+            }
+        }
+    }
+
+    resolve_init_service_reference(
+        stock_catalog,
+        formation_catalog,
+        consist_query,
+        formation_query,
+        prefer_kind,
+    )
+}
+
+fn resolve_init_service_reference(
+    stock_catalog: Option<&StockCatalog>,
+    formation_catalog: Option<&FormationCatalog>,
+    consist_query: Option<&str>,
+    formation_query: Option<&str>,
+    prefer_kind: ServiceReferenceKind,
+) -> Result<(Option<ScenarioAssetReference>, Option<ScenarioAssetReference>)> {
+    if let Some(query) = consist_query {
+        let catalog = stock_catalog.ok_or_else(|| {
+            anyhow::anyhow!("stock catalog not found; run discover-route first or omit --consist")
+        })?;
+        let matches = resolve_stock_matches(catalog, query);
+        let selected = matches
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no stock matches found for '{}'", query))?;
+        return Ok((Some(stock_entry_to_reference(selected)), None));
+    }
+
+    if let Some(query) = formation_query {
+        let catalog = formation_catalog.ok_or_else(|| {
+            anyhow::anyhow!(
+                "formation catalog not found; run discover-route first or omit --formation-ref"
+            )
+        })?;
+        let matches = resolve_formation_matches(catalog, query);
+        let selected = matches
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no formation matches found for '{}'", query))?;
+        return Ok((None, Some(formation_entry_to_reference(selected))));
+    }
+
+    match prefer_kind {
+        ServiceReferenceKind::Formation => {
+            if let Some(catalog) = formation_catalog {
+                if let Some(selected) = catalog.formations.first() {
+                    return Ok((None, Some(formation_entry_to_reference(selected))));
+                }
+            }
+            if let Some(catalog) = stock_catalog {
+                if let Some(selected) = catalog.stock.first() {
+                    return Ok((Some(stock_entry_to_reference(selected)), None));
+                }
+            }
+        }
+        ServiceReferenceKind::Stock => {
+            if let Some(catalog) = stock_catalog {
+                if let Some(selected) = catalog.stock.first() {
+                    return Ok((Some(stock_entry_to_reference(selected)), None));
+                }
+            }
+            if let Some(catalog) = formation_catalog {
+                if let Some(selected) = catalog.formations.first() {
+                    return Ok((None, Some(formation_entry_to_reference(selected))));
+                }
+            }
+        }
+    }
+
+    bail!("no stock or formation catalog entries available to initialize the player service")
+}
+
+fn select_service_reference_kind(
+    stock_catalog: Option<&StockCatalog>,
+    formation_catalog: Option<&FormationCatalog>,
+    prefer_kind: ServiceReferenceKind,
+) -> Result<ServiceReferenceKind> {
+    match (formation_catalog.is_some(), stock_catalog.is_some()) {
+        (true, true) => {
+            let options = vec![
+                "Use discovered formation".to_string(),
+                "Use stock/consist reference".to_string(),
+            ];
+            let default_index = match prefer_kind {
+                ServiceReferenceKind::Formation => 0,
+                ServiceReferenceKind::Stock => 1,
+            };
+            let choice = prompt_choice("Service reference type", &options, default_index)?;
+            if choice.starts_with("Use discovered formation") {
+                Ok(ServiceReferenceKind::Formation)
+            } else {
+                Ok(ServiceReferenceKind::Stock)
+            }
+        }
+        (true, false) => Ok(ServiceReferenceKind::Formation),
+        (false, true) => Ok(ServiceReferenceKind::Stock),
+        (false, false) => {
+            bail!("no stock or formation catalog entries available to initialize the player service");
+        }
+    }
+}
+
+fn print_init_scenario_summary(project: &ScenarioProject, output_path: &Path) {
+    println!("Scenario summary:");
+    println!("  Output: {}", output_path.display());
+    println!("  Id: {}", project.meta.id);
+    println!("  Title: {}", project.meta.title);
+    println!("  Author: {}", project.meta.author);
+    println!("  Route: {}", project.scenario.route);
+    println!("  Template: {}", project.scenario.template);
+    println!("  Start time: {}", project.scenario.start_time);
+    println!("  Weather: {}", project.scenario.weather);
+    println!(
+        "  Player start: {}",
+        format_scenario_location_summary(&project.player_service.start_location)
+    );
+    println!(
+        "  Destination: {}",
+        format_scenario_location_summary(&project.player_service.destination)
+    );
+    match (
+        project.player_service.consist.as_ref(),
+        project.player_service.formation_ref.as_ref(),
+    ) {
+        (Some(consist), None) => {
+            println!(
+                "  Player service: {}",
+                format_asset_reference_summary("consist", consist)
+            )
+        }
+        (None, Some(formation_ref)) => {
+            println!(
+                "  Player service: {}",
+                format_asset_reference_summary("formation_ref", formation_ref)
+            )
+        }
+        _ => {}
+    }
+    if project.ai_services.is_empty() {
+        println!("  AI services: none");
+    } else {
+        println!("  AI services: {}", project.ai_services.len());
+        for service in &project.ai_services {
+            let reference = match (service.consist.as_ref(), service.formation_ref.as_ref()) {
+                (Some(consist), None) => format_asset_reference_summary("consist", consist),
+                (None, Some(formation_ref)) => {
+                    format_asset_reference_summary("formation_ref", formation_ref)
+                }
+                _ => "custom".to_string(),
+            };
+            println!(
+                "    - {}: {} -> {} at {} ({})",
+                service.id,
+                format_scenario_location_summary(&service.start_location),
+                format_scenario_location_summary(&service.destination),
+                service.departure_time.as_deref().unwrap_or("n/a"),
+                reference
+            );
+        }
+    }
+}
+
+fn format_scenario_location_summary(location: &ScenarioLocation) -> String {
+    let mut segments = vec![location.display_label()];
+    if let Some(catalog_id) = location.catalog_id() {
+        segments.push(format!("catalog_id={catalog_id}"));
+    }
+    if let Some(spawn_tag) = location.spawn_tag() {
+        segments.push(format!("spawn_tag={spawn_tag}"));
+    }
+    if let Some(internal_ref) = location.internal_ref() {
+        segments.push(format!("internal_ref={internal_ref}"));
+    }
+    segments.join(" | ")
+}
+
+fn format_asset_reference_summary(kind: &str, reference: &ScenarioAssetReference) -> String {
+    let mut segments = vec![format!("{kind} {}", reference.id().unwrap_or_default())];
+    if let Some(plugin) = reference.plugin() {
+        segments.push(format!("plugin={plugin}"));
+    }
+    if let Some(source) = reference.source() {
+        segments.push(format!("source={source}"));
+    }
+    segments.join(" | ")
+}
+
+fn build_init_scenario_project(
+    scenario_id: &str,
+    route_id: &str,
+    template_id: &str,
+    start_time: &str,
+    weather: &str,
+    title: &str,
+    author: &str,
+    start_location: ScenarioLocation,
+    destination: ScenarioLocation,
+    consist_ref: Option<ScenarioAssetReference>,
+    formation_ref_value: Option<ScenarioAssetReference>,
+    ai_services: Vec<AiService>,
+) -> ScenarioProject {
+    let destination_label = destination
+        .primary_value()
+        .unwrap_or("destination")
+        .to_string();
+    let destination_reference = destination.clone();
+
+    ScenarioProject {
+        meta: Meta {
+            id: scenario_id.to_string(),
+            title: title.to_string(),
+            author: author.to_string(),
+        },
+        scenario: Scenario {
+            route: route_id.to_string(),
+            template: template_id.to_string(),
+            start_time: start_time.to_string(),
+            weather: weather.to_string(),
+        },
+        formations: Default::default(),
+        player_service: PlayerService {
+            consist: consist_ref,
+            formation: None,
+            formation_ref: formation_ref_value,
+            start_location,
+            destination,
+        },
+        ai_services,
+        objectives: vec![Objective {
+            id: "reach_destination".to_string(),
+            description: format!("Reach {}", destination_label),
+            kind: ObjectiveKind::ReachDestination,
+            location: Some(destination_reference),
+            time: None,
+        }],
+        completion: CompletionRules {
+            success: vec![Condition {
+                kind: ConditionKind::AllObjectivesCompleted,
+                objective_id: None,
+                service_id: None,
+                time: None,
+                description: Some("Complete the generated starter scenario".to_string()),
+            }],
+            failure: Vec::new(),
+        },
+    }
+}
+
+fn configure_init_ai_services(
+    location_catalog: Option<&LocationCatalog>,
+    route_profile: &RouteProfile,
+    stock_catalog: Option<&StockCatalog>,
+    formation_catalog: Option<&FormationCatalog>,
+    prefer_service_ref: ServiceReferenceKind,
+    start_time: &str,
+    existing_service: Option<&AiService>,
+) -> Result<Vec<AiService>> {
+    let add_ai = prompt_yes_no("Add an AI service?", existing_service.is_some())?;
+    if !add_ai {
+        return Ok(Vec::new());
+    }
+
+    let ai_start = select_init_location(
+        location_catalog,
+        route_profile,
+        existing_service
+            .and_then(|service| service.start_location.primary_value()),
+        LocationUsage::Service,
+    )?;
+    let ai_destination = select_init_destination(
+        location_catalog,
+        route_profile,
+        &ai_start,
+        existing_service
+            .and_then(|service| service.destination.primary_value()),
+    )?;
+    let (ai_consist_ref, ai_formation_ref_value) = select_init_service_reference(
+        stock_catalog,
+        formation_catalog,
+        existing_service
+            .and_then(|service| service.consist.as_ref())
+            .and_then(ScenarioAssetReference::id),
+        existing_service
+            .and_then(|service| service.formation_ref.as_ref())
+            .and_then(ScenarioAssetReference::id),
+        prefer_service_ref,
+    )?;
+    let default_departure = existing_service
+        .and_then(|service| service.departure_time.as_deref())
+        .unwrap_or(start_time);
+    let ai_departure_time = prompt_text("AI departure time", Some(default_departure))?;
+
+    Ok(vec![AiService {
+        id: "ai_service_01".to_string(),
+        consist: ai_consist_ref,
+        formation: None,
+        formation_ref: ai_formation_ref_value,
+        start_location: ai_start,
+        destination: ai_destination,
+        departure_time: Some(ai_departure_time),
+    }])
+}
+
+fn resolve_init_location(
+    location_catalog: Option<&LocationCatalog>,
+    route_profile: &RouteProfile,
+    query: Option<&str>,
+    usage: LocationUsage,
+) -> Result<ScenarioLocation> {
+    if let Some(catalog) = location_catalog {
+        if let Some(query) = query {
+            let matches = resolve_location_matches(catalog, query, location_lookup_usage(usage));
+            if let Some(selected) = matches.first() {
+                return Ok(location_match_to_scenario_location(selected));
+            }
+            bail!(
+                "no {} location matches found for '{}'",
+                usage.as_str(),
+                query
+            );
+        }
+
+        let labels = list_locations_from_catalog(catalog, usage);
+        if let Some(label) = labels.first() {
+            let matches = resolve_location_matches(catalog, label, location_lookup_usage(usage));
+            if let Some(selected) = matches.first() {
+                return Ok(location_match_to_scenario_location(selected));
+            }
+        }
+    }
+
+    let fallback = match usage {
+        LocationUsage::PlayerSpawn => route_profile
+            .player_spawn_points
+            .first()
+            .map(String::as_str)
+            .or_else(|| route_profile.spawn_points.first().map(String::as_str)),
+        LocationUsage::Service => route_profile
+            .service_locations
+            .first()
+            .map(String::as_str)
+            .or_else(|| route_profile.spawn_points.first().map(String::as_str)),
+        LocationUsage::Objective => route_profile
+            .objective_locations
+            .first()
+            .map(String::as_str)
+            .or_else(|| route_profile.service_locations.first().map(String::as_str)),
+    }
+    .or(query);
+
+    fallback
+        .map(|value| ScenarioLocation::Simple(value.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("no {} locations available for route '{}'", usage.as_str(), route_profile.id))
+}
+
+fn resolve_init_destination(
+    location_catalog: Option<&LocationCatalog>,
+    route_profile: &RouteProfile,
+    start_location: &ScenarioLocation,
+    query: Option<&str>,
+) -> Result<ScenarioLocation> {
+    if let Some(query) = query {
+        return resolve_init_location(
+            location_catalog,
+            route_profile,
+            Some(query),
+            LocationUsage::Service,
+        );
+    }
+
+    if let Some(catalog) = location_catalog {
+        let start_label = start_location.display_label();
+        for label in list_locations_from_catalog(catalog, LocationUsage::Service) {
+            let matches =
+                resolve_location_matches(catalog, &label, location_lookup_usage(LocationUsage::Service));
+            if let Some(selected) = matches.first() {
+                let candidate = location_match_to_scenario_location(selected);
+                if !candidate
+                    .display_label()
+                    .eq_ignore_ascii_case(start_label.as_str())
+                {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    let destination = resolve_init_location(
+        location_catalog,
+        route_profile,
+        None,
+        LocationUsage::Service,
+    )?;
+    if destination
+        .display_label()
+        .eq_ignore_ascii_case(start_location.display_label().as_str())
+    {
+        for candidate in &route_profile.service_locations {
+            if !candidate.eq_ignore_ascii_case(start_location.display_label().as_str()) {
+                return Ok(ScenarioLocation::Simple(candidate.clone()));
+            }
+        }
+    }
+    Ok(destination)
+}
+
+fn location_match_to_scenario_location(selected: &LocationMatch) -> ScenarioLocation {
+    let mut reference = ScenarioLocationReference {
+        name: Some(selected.display_name.clone()),
+        catalog_id: Some(selected.catalog_id.clone()),
+        spawn_tag: selected.spawn_tag.clone(),
+        internal_ref: selected.internal_ref.clone(),
+    };
+
+    if reference.catalog_id.is_none() && reference.spawn_tag.is_none() && reference.internal_ref.is_none()
+    {
+        if let Some(name) = reference.name {
+            return ScenarioLocation::Simple(name);
+        }
+    }
+
+    if reference
+        .name
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        reference.name = Some(selected.display_name.clone());
+    }
+
+    ScenarioLocation::Detailed(reference)
+}
+
+fn stock_entry_to_reference(entry: &StockCatalogEntry) -> ScenarioAssetReference {
+    ScenarioAssetReference::Detailed(tsw_scenario_schema::ScenarioAssetSelector {
+        id: entry.id.clone(),
+        plugin: entry.plugin.clone(),
+        source: Some(entry.source.clone()),
+    })
+}
+
+fn formation_entry_to_reference(entry: &FormationCatalogEntry) -> ScenarioAssetReference {
+    ScenarioAssetReference::Detailed(tsw_scenario_schema::ScenarioAssetSelector {
+        id: entry.id.clone(),
+        plugin: entry.plugin.clone(),
+        source: Some(entry.source.clone()),
+    })
 }
 
 fn insert_location_label(locations: &mut BTreeSet<String>, value: &str) {

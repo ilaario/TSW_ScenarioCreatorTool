@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_workspace(name: &str) -> PathBuf {
@@ -715,4 +716,385 @@ fn list_formations_and_show_formation_commands_use_formation_catalog() {
     assert!(show_stdout.contains("RVD_DB_BR422_A"));
     assert!(show_stdout.contains("RVD_DB_BR422_B, flipped=true"));
     assert!(show_stdout.contains("cargo=/Game/Core/Assets/Cargo/Passenger.Passenger"));
+}
+
+#[test]
+fn show_service_ref_command_prints_yaml_snippets_for_stock_and_formations() {
+    let workspace = create_fixture_workspace(&[]);
+    let binary = env!("CARGO_BIN_EXE_tswtool");
+
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.stock_catalog.json"),
+        "{\n  \"schema_version\": 1,\n  \"route_id\": \"RRO\",\n  \"stock\": [\n    {\n      \"id\": \"RVD_DB_BR422\",\n      \"plugin\": \"RRO_Route\",\n      \"source\": \"TS2Prototype/Plugins/DLC/RRO_Route/Content/Timetable/RRO_Timetable.json\",\n      \"evidence\": \"RailVehicleDefinition'RVD_DB_BR422'\"\n    }\n  ],\n  \"summary\": {\n    \"stock_count\": 1,\n    \"plugin_count\": 1,\n    \"source_count\": 1\n  }\n}\n",
+    );
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.formation_catalog.json"),
+        "{\n  \"schema_version\": 1,\n  \"route_id\": \"RRO\",\n  \"formations\": [\n    {\n      \"id\": \"RRO_PlayerFormation\",\n      \"plugin\": \"RRO_Gameplay\",\n      \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Scenarios/ScA/Formations/RRO_PlayerFormation.json\",\n      \"entries\": [\n        {\n          \"index\": 0,\n          \"vehicle_id\": \"RVD_DB_BR422_A\",\n          \"flipped\": false,\n          \"cargo_loaded\": false\n        }\n      ],\n      \"drivable\": true\n    }\n  ],\n  \"summary\": {\n    \"formation_count\": 1,\n    \"plugin_count\": 1,\n    \"source_count\": 1\n  }\n}\n",
+    );
+
+    let stock_output = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("show-service-ref")
+        .arg("BR422")
+        .arg("--kind")
+        .arg("stock")
+        .output()
+        .expect("failed to run show-service-ref stock command");
+
+    assert!(
+        stock_output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&stock_output.stdout),
+        String::from_utf8_lossy(&stock_output.stderr)
+    );
+
+    let stock_stdout = String::from_utf8_lossy(&stock_output.stdout);
+    assert!(stock_stdout.contains("Service reference matches for route 'RRO': 1"));
+    assert!(stock_stdout.contains("Kind: stock"));
+    assert!(stock_stdout.contains("YAML snippet:"));
+    assert!(stock_stdout.contains("consist:"));
+    assert!(stock_stdout.contains("id: RVD_DB_BR422"));
+    assert!(stock_stdout.contains("plugin: RRO_Route"));
+
+    let formation_output = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("show-service-ref")
+        .arg("PlayerFormation")
+        .arg("--kind")
+        .arg("formation")
+        .output()
+        .expect("failed to run show-service-ref formation command");
+
+    assert!(
+        formation_output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&formation_output.stdout),
+        String::from_utf8_lossy(&formation_output.stderr)
+    );
+
+    let formation_stdout = String::from_utf8_lossy(&formation_output.stdout);
+    assert!(formation_stdout.contains("Service reference matches for route 'RRO': 1"));
+    assert!(formation_stdout.contains("Kind: formation"));
+    assert!(formation_stdout.contains("YAML snippet:"));
+    assert!(formation_stdout.contains("formation_ref:"));
+    assert!(formation_stdout.contains("id: RRO_PlayerFormation"));
+    assert!(formation_stdout.contains("plugin: RRO_Gameplay"));
+}
+
+#[test]
+fn init_scenario_command_generates_valid_yaml_from_catalog_defaults() {
+    let workspace = create_fixture_workspace(&[]);
+    let binary = env!("CARGO_BIN_EXE_tswtool");
+
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.location_catalog.json"),
+        "{\n  \"schema_version\": 2,\n  \"route_id\": \"RRO\",\n  \"route_overview\": {\n    \"display_name\": \"Ruhr-Sieg Nord\",\n    \"stat_tracking_name\": \"RuhrSiegNord\",\n    \"start_point\": \"Essen\",\n    \"end_point\": \"Bochum\",\n    \"country\": \"Deutschland\",\n    \"level_asset\": \"/RRO/Map/RROMap.RROMap\",\n    \"route_map_widget\": \"/RRO/UI/RRORouteMapWidget.RRORouteMapWidget_C\"\n  },\n  \"stations\": [\n    {\n      \"id\": \"essen_hbf\",\n      \"display_name\": \"Essen Hbf\",\n      \"confidence\": \"high\",\n      \"allowed_uses\": [\"player_spawn\"],\n      \"tags\": [\"Essen_Hbf_P5\"],\n      \"frontend_spawn_points\": [\n        {\n          \"tag\": \"Essen_Hbf_P5\",\n          \"display_name\": \"Essen Hbf P5\",\n          \"available_in_frontend\": true,\n          \"available_in_fast_travel\": true,\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO/Content/RouteDefinition/RRORouteDefinition.json\"\n        }\n      ],\n      \"locations\": [\n        {\n          \"id\": \"bochum_hbf_p3\",\n          \"display_name\": \"Bochum Hbf P3\",\n          \"kind\": \"platform\",\n          \"source_kind\": \"timetable\",\n          \"confidence\": \"high\",\n          \"allowed_uses\": [\"service_start\", \"service_end\", \"objective_location\"],\n          \"internal_ref\": \"REF-BOCHUM-P3\",\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Timetable/RRO_Timetable.json\"\n        }\n      ]\n    }\n  ],\n  \"ungrouped_locations\": [],\n  \"summary\": {\n    \"station_count\": 1,\n    \"frontend_spawn_point_count\": 1,\n    \"grouped_location_count\": 1,\n    \"ungrouped_location_count\": 0\n  }\n}\n",
+    );
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.formation_catalog.json"),
+        "{\n  \"schema_version\": 1,\n  \"route_id\": \"RRO\",\n  \"formations\": [\n    {\n      \"id\": \"RRO_PlayerFormation\",\n      \"plugin\": \"RRO_Gameplay\",\n      \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Scenarios/ScA/Formations/RRO_PlayerFormation.json\",\n      \"entries\": [\n        {\n          \"index\": 0,\n          \"vehicle_id\": \"RVD_DB_BR422_A\",\n          \"flipped\": false,\n          \"cargo_loaded\": false\n        }\n      ],\n      \"drivable\": true\n    }\n  ],\n  \"summary\": {\n    \"formation_count\": 1,\n    \"plugin_count\": 1,\n    \"source_count\": 1\n  }\n}\n",
+    );
+
+    let output_path = workspace.join("examples").join("generated_init.yaml");
+    let init_output = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("init-scenario")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--scenario-id")
+        .arg("generated_init")
+        .arg("--title")
+        .arg("Generated Init")
+        .arg("--author")
+        .arg("Codex")
+        .output()
+        .expect("failed to run init-scenario command");
+
+    assert!(
+        init_output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&init_output.stdout),
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
+    let generated = fs::read_to_string(&output_path).expect("failed to read generated scenario");
+    assert!(generated.contains("id: generated_init"));
+    assert!(generated.contains("route: RRO"));
+    assert!(generated.contains("formation_ref:"));
+    assert!(generated.contains("id: RRO_PlayerFormation"));
+    assert!(generated.contains("start_location:"));
+    assert!(generated.contains("catalog_id:") || generated.contains("spawn_tag:"));
+    assert!(generated.contains("internal_ref: REF-BOCHUM-P3"));
+
+    let validate_output = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("validate")
+        .arg(&output_path)
+        .output()
+        .expect("failed to validate generated scenario");
+
+    assert!(
+        validate_output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&validate_output.stdout),
+        String::from_utf8_lossy(&validate_output.stderr)
+    );
+}
+
+#[test]
+fn init_scenario_command_supports_guided_prompt_flow() {
+    let workspace = create_fixture_workspace(&[]);
+    let binary = env!("CARGO_BIN_EXE_tswtool");
+
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.location_catalog.json"),
+        "{\n  \"schema_version\": 2,\n  \"route_id\": \"RRO\",\n  \"route_overview\": {\n    \"display_name\": \"Ruhr-Sieg Nord\",\n    \"stat_tracking_name\": \"RuhrSiegNord\",\n    \"start_point\": \"Essen\",\n    \"end_point\": \"Bochum\",\n    \"country\": \"Deutschland\",\n    \"level_asset\": \"/RRO/Map/RROMap.RROMap\",\n    \"route_map_widget\": \"/RRO/UI/RRORouteMapWidget.RRORouteMapWidget_C\"\n  },\n  \"stations\": [\n    {\n      \"id\": \"essen_hbf\",\n      \"display_name\": \"Essen Hbf\",\n      \"confidence\": \"high\",\n      \"allowed_uses\": [\"player_spawn\"],\n      \"tags\": [\"Essen_Hbf_P5\"],\n      \"frontend_spawn_points\": [\n        {\n          \"tag\": \"Essen_Hbf_P5\",\n          \"display_name\": \"Essen Hbf P5\",\n          \"available_in_frontend\": true,\n          \"available_in_fast_travel\": true,\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO/Content/RouteDefinition/RRORouteDefinition.json\"\n        }\n      ],\n      \"locations\": [\n        {\n          \"id\": \"bochum_hbf_p3\",\n          \"display_name\": \"Bochum Hbf P3\",\n          \"kind\": \"platform\",\n          \"source_kind\": \"timetable\",\n          \"confidence\": \"high\",\n          \"allowed_uses\": [\"service_start\", \"service_end\", \"objective_location\"],\n          \"internal_ref\": \"REF-BOCHUM-P3\",\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Timetable/RRO_Timetable.json\"\n        }\n      ]\n    }\n  ],\n  \"ungrouped_locations\": [],\n  \"summary\": {\n    \"station_count\": 1,\n    \"frontend_spawn_point_count\": 1,\n    \"grouped_location_count\": 1,\n    \"ungrouped_location_count\": 0\n  }\n}\n",
+    );
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.formation_catalog.json"),
+        "{\n  \"schema_version\": 1,\n  \"route_id\": \"RRO\",\n  \"formations\": [\n    {\n      \"id\": \"RRO_PlayerFormation\",\n      \"plugin\": \"RRO_Gameplay\",\n      \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Scenarios/ScA/Formations/RRO_PlayerFormation.json\",\n      \"entries\": [\n        {\n          \"index\": 0,\n          \"vehicle_id\": \"RVD_DB_BR422_A\",\n          \"flipped\": false,\n          \"cargo_loaded\": false\n        }\n      ],\n      \"drivable\": true\n    }\n  ],\n  \"summary\": {\n    \"formation_count\": 1,\n    \"plugin_count\": 1,\n    \"source_count\": 1\n  }\n}\n",
+    );
+
+    let output_path = workspace.join("examples").join("guided_init.yaml");
+    let mut child = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("init-scenario")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--force")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn guided init-scenario command");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not available");
+        stdin
+            .write_all(b"guided_init\nGuided Init\nCodex\nEssen Hbf P5\nBochum Hbf P3\n1\nn\ny\n")
+            .expect("failed to write guided answers");
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for guided init-scenario");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Scenario summary:"));
+    assert!(stdout.contains("Write scenario file?"));
+    assert!(stdout.contains("spawn_tag=Essen_Hbf_P5"));
+    assert!(stdout.contains("internal_ref=REF-BOCHUM-P3"));
+    assert!(stdout.contains("plugin=RRO_Gameplay"));
+    assert!(stdout.contains("source=TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Scenarios/ScA/Formations/RRO_PlayerFormation.json"));
+
+    let generated = fs::read_to_string(&output_path).expect("failed to read guided scenario");
+    assert!(generated.contains("id: guided_init"));
+    assert!(generated.contains("title: Guided Init"));
+    assert!(generated.contains("author: Codex"));
+    assert!(generated.contains("formation_ref:"));
+    assert!(generated.contains("name: Bochum Hbf P3"));
+    assert!(!generated.contains("ai_services:"));
+}
+
+#[test]
+fn init_scenario_command_can_add_guided_ai_service() {
+    let workspace = create_fixture_workspace(&[]);
+    let binary = env!("CARGO_BIN_EXE_tswtool");
+
+    write_file(
+        &workspace.join("artifacts").join("discovery").join("rro.location_catalog.json"),
+        "{\n  \"schema_version\": 2,\n  \"route_id\": \"RRO\",\n  \"route_overview\": {\n    \"display_name\": \"Ruhr-Sieg Nord\",\n    \"stat_tracking_name\": \"RuhrSiegNord\",\n    \"start_point\": \"Essen\",\n    \"end_point\": \"Bochum\",\n    \"country\": \"Deutschland\",\n    \"level_asset\": \"/RRO/Map/RROMap.RROMap\",\n    \"route_map_widget\": \"/RRO/UI/RRORouteMapWidget.RRORouteMapWidget_C\"\n  },\n  \"stations\": [\n    {\n      \"id\": \"essen_hbf\",\n      \"display_name\": \"Essen Hbf\",\n      \"confidence\": \"high\",\n      \"allowed_uses\": [\"player_spawn\"],\n      \"tags\": [\"Essen_Hbf_P5\"],\n      \"frontend_spawn_points\": [\n        {\n          \"tag\": \"Essen_Hbf_P5\",\n          \"display_name\": \"Essen Hbf P5\",\n          \"available_in_frontend\": true,\n          \"available_in_fast_travel\": true,\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO/Content/RouteDefinition/RRORouteDefinition.json\"\n        }\n      ],\n      \"locations\": [\n        {\n          \"id\": \"bochum_hbf_p3\",\n          \"display_name\": \"Bochum Hbf P3\",\n          \"kind\": \"platform\",\n          \"source_kind\": \"timetable\",\n          \"confidence\": \"high\",\n          \"allowed_uses\": [\"service_start\", \"service_end\", \"objective_location\"],\n          \"internal_ref\": \"REF-BOCHUM-P3\",\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Timetable/RRO_Timetable.json\"\n        }\n      ]\n    }\n  ],\n  \"ungrouped_locations\": [],\n  \"summary\": {\n    \"station_count\": 1,\n    \"frontend_spawn_point_count\": 1,\n    \"grouped_location_count\": 1,\n    \"ungrouped_location_count\": 0\n  }\n}\n",
+    );
+    write_file(
+        &workspace.join("artifacts").join("discovery").join("rro.formation_catalog.json"),
+        "{\n  \"schema_version\": 1,\n  \"route_id\": \"RRO\",\n  \"formations\": [\n    {\n      \"id\": \"RRO_PlayerFormation\",\n      \"plugin\": \"RRO_Gameplay\",\n      \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Scenarios/ScA/Formations/RRO_PlayerFormation.json\",\n      \"entries\": [{\"index\": 0, \"vehicle_id\": \"RVD_DB_BR422_A\", \"flipped\": false, \"cargo_loaded\": false}],\n      \"drivable\": true\n    }\n  ],\n  \"summary\": {\n    \"formation_count\": 1,\n    \"plugin_count\": 1,\n    \"source_count\": 1\n  }\n}\n",
+    );
+
+    let output_path = workspace.join("examples").join("guided_ai_init.yaml");
+    let mut child = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("init-scenario")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--force")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn guided ai init-scenario command");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not available");
+        stdin
+            .write_all(b"guided_ai_init\nGuided AI Init\nCodex\nEssen Hbf P5\nBochum Hbf P3\n1\ny\nBochum Hbf P3\nEssen Hbf P5\n1\n08:05\ny\n")
+            .expect("failed to write guided ai answers");
+    }
+
+    let output = child.wait_with_output().expect("failed to wait for guided ai init-scenario");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let generated = fs::read_to_string(&output_path).expect("failed to read guided ai scenario");
+    assert!(generated.contains("ai_services:"));
+    assert!(generated.contains("id: ai_service_01"));
+    assert!(generated.contains("departure_time: \"08:05\"") || generated.contains("departure_time: 08:05"));
+}
+
+#[test]
+fn init_scenario_summary_allows_editing_before_write() {
+    let workspace = create_fixture_workspace(&[]);
+    let binary = env!("CARGO_BIN_EXE_tswtool");
+
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.location_catalog.json"),
+        "{\n  \"schema_version\": 2,\n  \"route_id\": \"RRO\",\n  \"route_overview\": {\n    \"display_name\": \"Ruhr-Sieg Nord\",\n    \"stat_tracking_name\": \"RuhrSiegNord\",\n    \"start_point\": \"Essen\",\n    \"end_point\": \"Bochum\",\n    \"country\": \"Deutschland\",\n    \"level_asset\": \"/RRO/Map/RROMap.RROMap\",\n    \"route_map_widget\": \"/RRO/UI/RRORouteMapWidget.RRORouteMapWidget_C\"\n  },\n  \"stations\": [\n    {\n      \"id\": \"essen_hbf\",\n      \"display_name\": \"Essen Hbf\",\n      \"confidence\": \"high\",\n      \"allowed_uses\": [\"player_spawn\"],\n      \"tags\": [\"Essen_Hbf_P5\"],\n      \"frontend_spawn_points\": [\n        {\n          \"tag\": \"Essen_Hbf_P5\",\n          \"display_name\": \"Essen Hbf P5\",\n          \"available_in_frontend\": true,\n          \"available_in_fast_travel\": true,\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO/Content/RouteDefinition/RRORouteDefinition.json\"\n        }\n      ],\n      \"locations\": [\n        {\n          \"id\": \"bochum_hbf_p3\",\n          \"display_name\": \"Bochum Hbf P3\",\n          \"kind\": \"platform\",\n          \"source_kind\": \"timetable\",\n          \"confidence\": \"high\",\n          \"allowed_uses\": [\"service_start\", \"service_end\", \"objective_location\"],\n          \"internal_ref\": \"REF-BOCHUM-P3\",\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Timetable/RRO_Timetable.json\"\n        }\n      ]\n    }\n  ],\n  \"ungrouped_locations\": [],\n  \"summary\": {\n    \"station_count\": 1,\n    \"frontend_spawn_point_count\": 1,\n    \"grouped_location_count\": 1,\n    \"ungrouped_location_count\": 0\n  }\n}\n",
+    );
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.formation_catalog.json"),
+        "{\n  \"schema_version\": 1,\n  \"route_id\": \"RRO\",\n  \"formations\": [\n    {\n      \"id\": \"RRO_PlayerFormation\",\n      \"plugin\": \"RRO_Gameplay\",\n      \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Scenarios/ScA/Formations/RRO_PlayerFormation.json\",\n      \"entries\": [{\"index\": 0, \"vehicle_id\": \"RVD_DB_BR422_A\", \"flipped\": false, \"cargo_loaded\": false}],\n      \"drivable\": true\n    }\n  ],\n  \"summary\": {\n    \"formation_count\": 1,\n    \"plugin_count\": 1,\n    \"source_count\": 1\n  }\n}\n",
+    );
+
+    let output_path = workspace.join("examples").join("guided_edit_init.yaml");
+    let mut child = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("init-scenario")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--force")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn guided edit init-scenario command");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not available");
+        stdin
+            .write_all(b"guided_edit_init\nOriginal Title\nCodex\nEssen Hbf P5\nBochum Hbf P3\n1\nn\nn\n1\nRetitled Scenario\n8\ny\n")
+            .expect("failed to write guided edit answers");
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for guided edit init-scenario");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("What do you want to edit?"));
+    assert!(stdout.contains("Scenario summary:"));
+    assert!(stdout.contains("Back to summary"));
+
+    let generated = fs::read_to_string(&output_path).expect("failed to read guided edited scenario");
+    assert!(generated.contains("title: Retitled Scenario"));
+}
+
+#[test]
+fn init_scenario_summary_allows_multiple_edits_before_returning() {
+    let workspace = create_fixture_workspace(&[]);
+    let binary = env!("CARGO_BIN_EXE_tswtool");
+
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.location_catalog.json"),
+        "{\n  \"schema_version\": 2,\n  \"route_id\": \"RRO\",\n  \"route_overview\": {\n    \"display_name\": \"Ruhr-Sieg Nord\",\n    \"stat_tracking_name\": \"RuhrSiegNord\",\n    \"start_point\": \"Essen\",\n    \"end_point\": \"Bochum\",\n    \"country\": \"Deutschland\",\n    \"level_asset\": \"/RRO/Map/RROMap.RROMap\",\n    \"route_map_widget\": \"/RRO/UI/RRORouteMapWidget.RRORouteMapWidget_C\"\n  },\n  \"stations\": [\n    {\n      \"id\": \"essen_hbf\",\n      \"display_name\": \"Essen Hbf\",\n      \"confidence\": \"high\",\n      \"allowed_uses\": [\"player_spawn\"],\n      \"tags\": [\"Essen_Hbf_P5\"],\n      \"frontend_spawn_points\": [\n        {\n          \"tag\": \"Essen_Hbf_P5\",\n          \"display_name\": \"Essen Hbf P5\",\n          \"available_in_frontend\": true,\n          \"available_in_fast_travel\": true,\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO/Content/RouteDefinition/RRORouteDefinition.json\"\n        }\n      ],\n      \"locations\": [\n        {\n          \"id\": \"bochum_hbf_p3\",\n          \"display_name\": \"Bochum Hbf P3\",\n          \"kind\": \"platform\",\n          \"source_kind\": \"timetable\",\n          \"confidence\": \"high\",\n          \"allowed_uses\": [\"service_start\", \"service_end\", \"objective_location\"],\n          \"internal_ref\": \"REF-BOCHUM-P3\",\n          \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Timetable/RRO_Timetable.json\"\n        }\n      ]\n    }\n  ],\n  \"ungrouped_locations\": [],\n  \"summary\": {\n    \"station_count\": 1,\n    \"frontend_spawn_point_count\": 1,\n    \"grouped_location_count\": 1,\n    \"ungrouped_location_count\": 0\n  }\n}\n",
+    );
+    write_file(
+        &workspace
+            .join("artifacts")
+            .join("discovery")
+            .join("rro.formation_catalog.json"),
+        "{\n  \"schema_version\": 1,\n  \"route_id\": \"RRO\",\n  \"formations\": [\n    {\n      \"id\": \"RRO_PlayerFormation\",\n      \"plugin\": \"RRO_Gameplay\",\n      \"source\": \"TS2Prototype/Plugins/DLC/RRO_Gameplay/Content/Scenarios/ScA/Formations/RRO_PlayerFormation.json\",\n      \"entries\": [{\"index\": 0, \"vehicle_id\": \"RVD_DB_BR422_A\", \"flipped\": false, \"cargo_loaded\": false}],\n      \"drivable\": true\n    }\n  ],\n  \"summary\": {\n    \"formation_count\": 1,\n    \"plugin_count\": 1,\n    \"source_count\": 1\n  }\n}\n",
+    );
+
+    let output_path = workspace.join("examples").join("guided_multi_edit_init.yaml");
+    let mut child = Command::new(binary)
+        .current_dir(&workspace)
+        .arg("--project-root")
+        .arg(&workspace)
+        .arg("init-scenario")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--force")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn guided multi-edit init-scenario command");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin not available");
+        stdin
+            .write_all(b"guided_multi_edit\nOriginal Title\nOriginal Author\nEssen Hbf P5\nBochum Hbf P3\n1\nn\nn\n1\nRetitled Scenario\n2\nRetitled Author\n8\ny\n")
+            .expect("failed to write guided multi-edit answers");
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for guided multi-edit init-scenario");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let generated =
+        fs::read_to_string(&output_path).expect("failed to read guided multi-edit scenario");
+    assert!(generated.contains("title: Retitled Scenario"));
+    assert!(generated.contains("author: Retitled Author"));
 }
